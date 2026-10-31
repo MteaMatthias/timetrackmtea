@@ -100,12 +100,13 @@ struct WeekView: View {
                 self.error = error.localizedDescription
             }
         }
-        let matcher = Matcher(ownDomain: UserDefaults.standard.string(forKey: "tlOwnDomain"))
+        let matcher = Matcher.current()
         days = dates.map { d in
             let (a, b) = Store.dayBounds(d)
+            let key = Store.dayKey(d)
             let mine = registered.filter { r in
-                guard let s = r.start else { return false }
-                return s >= a && s < b
+                if let s = r.start { return s >= a && s < b }
+                return r.day == key
             }
             let plan = Planner.plan(day: d, registered: mine, matcher: matcher, roundTo: Prefs.roundTo)
             return Summary(id: d, worked: plan.worked, registered: plan.registeredSeconds, proposed: plan.proposedSeconds)

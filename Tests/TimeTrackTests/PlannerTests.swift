@@ -26,8 +26,9 @@ final class PlannerTests: XCTestCase {
                             from, to, app, "", title, host)
     }
 
-    private func plan(registered: [Registered] = [], roundTo: Int = 1) -> DayPlan {
-        Planner.plan(day: day, registered: registered, matcher: Matcher(), roundTo: roundTo)
+    private func plan(registered: [Registered] = [], roundTo: Int = 1, events: [CalendarEvent] = []) -> DayPlan {
+        Planner.plan(day: day, registered: registered, matcher: Matcher(ownDomain: "mtea.be", excluded: []),
+                     roundTo: roundTo, events: events)
     }
 
     func testWebsiteVisitBecomesProposalWithReason() {
@@ -93,26 +94,26 @@ final class PlannerTests: XCTestCase {
     }
 
     func testCompanyNameInWindowTitle() {
-        let (match, reason) = Matcher().match(app: "Microsoft Word", title: "Offerte Bakkerij Peeters v3.docx", host: "")
+        let (match, reason) = Matcher(excluded: []).match(app: "Microsoft Word", title: "Offerte Bakkerij Peeters v3.docx", host: "")
         XCTAssertEqual(match.companyId, "c-peeters")
         XCTAssertTrue(reason.contains("Bakkerij Peeters"))
     }
 
     func testNameMustMatchWholeWords() {
         // "Janssen" mag niet matchen in "Janssens" (ander bedrijf).
-        let (match, _) = Matcher().match(app: "Mail", title: "Re: vraag van Janssens", host: "")
+        let (match, _) = Matcher(excluded: []).match(app: "Mail", title: "Re: vraag van Janssens", host: "")
         XCTAssertFalse(match.isAssigned)
     }
 
     func testGenericMailDomainIsIgnored() {
         Store.replaceCompanies([Company(id: "c-x", name: "Klant Met Gmail", domains: ["gmail.com"])])
-        let (match, _) = Matcher().match(app: "Safari", title: "Inbox", host: "mail.gmail.com")
+        let (match, _) = Matcher(excluded: []).match(app: "Safari", title: "Inbox", host: "mail.gmail.com")
         XCTAssertFalse(match.isAssigned)
     }
 
     func testCorrectionRuleWins() {
         Store.save(Rule(field: "any", pattern: "janssen.be", companyId: "c-peeters", companyName: "Bakkerij Peeters BV"))
-        let (match, reason) = Matcher().match(app: "Safari", title: "", host: "janssen.be")
+        let (match, reason) = Matcher(excluded: []).match(app: "Safari", title: "", host: "janssen.be")
         XCTAssertEqual(match.companyId, "c-peeters")
         XCTAssertTrue(reason.hasPrefix("regel"))
     }
@@ -149,5 +150,84 @@ final class PlannerTests: XCTestCase {
         let p = plan(registered: [registered], roundTo: 15)
         XCTAssertEqual(p.proposals.first?.start, t(13))
         XCTAssertLessThanOrEqual(p.proposals.first?.end ?? 0, t(14))
+    }
+
+    // MARK: Bevindingen uit de controles
+
+    func testRegistrationWithoutStartTimeIsSubtracted() {
+        activity(t(13), t(15), host: "janssen.be")
+        let untimed = Registered(id: "r1", start: nil, duration: 3600, companyId: "c-janssen",
+                                 companyName: "Janssen NV", description: "", day: "2026-10-27")
+        let p = plan(registered: [untimed])
+        XCTAssertEqual(p.proposals.count, 1)
+        XCTAssertEqual(p.proposals.first?.duration ?? 0, 3600, accuracy: 1)
+    }
+
+    func testMeetingWithClientCountsAsWorkWithoutInput() {
+        activity(t(9), t(10), app: "Finder")          // Mac was in gebruik die ochtend
+        let meeting = CalendarEvent(start: t(10), end: t(11), title: "Overleg", attendeeEmails: ["piet@janssen.be"])
+        let p = plan(events: [meeting])
+        let janssen = p.proposals.first { $0.match.companyId == "c-janssen" }
+        XCTAssertEqual(janssen?.start, t(10))
+        XCTAssertEqual(janssen?.end, t(11))
+        XCTAssertTrue(janssen?.reasons.first?.contains("afspraak met piet@janssen.be") ?? false)
+    }
+
+    func testRecurringMeetingOnDayOffIsNotWork() {
+        let meeting = CalendarEvent(start: t(10), end: t(11), title: "Overleg", attendeeEmails: ["piet@janssen.be"])
+        XCTAssertTrue(plan(events: [meeting]).proposals.isEmpty)
+    }
+
+    func testUnrecognisedMeetingDoesNotOverrideClientWork() {
+        activity(t(10), t(11), host: "janssen.be")
+        let webinar = CalendarEvent(start: t(10), end: t(11), title: "Bedrijfswebinar", attendeeEmails: ["x@onbekend.be"])
+        let p = plan(events: [webinar])
+        XCTAssertEqual(p.proposals.map(\.match.companyId), ["c-janssen"])
+    }
+
+    func testPrivateMinutesAreNotBridged() {
+        Store.save(Rule(field: "any", pattern: "youtube.com", skip: true))
+        activity(t(13), t(14), host: "janssen.be")
+        activity(t(14), t(14, 3), host: "youtube.com")
+        activity(t(14, 3), t(15), host: "janssen.be")
+        let p = plan()
+        XCTAssertEqual(p.proposals.count, 2)
+        XCTAssertEqual(p.worked, 117 * 60, accuracy: 1)
+    }
+
+    func testProposalIdIsStableWhileBlockGrows() {
+        activity(t(13), t(14), host: "janssen.be")
+        let first = plan().proposals.first?.id
+        activity(t(14), t(14, 20), host: "janssen.be")
+        XCTAssertEqual(plan().proposals.first?.id, first)
+    }
+
+    func testDomainSharedByTwoCompaniesIsIgnored() {
+        Store.replaceCompanies([janssen, peeters, Company(id: "c-3", name: "Derde", domains: ["janssen.be"])])
+        let (match, _) = Matcher(excluded: []).match(app: "Safari", title: "", host: "janssen.be")
+        XCTAssertFalse(match.isAssigned)
+    }
+
+    func testOwnCompanyIsNeverAClient() {
+        Store.replaceCompanies([janssen, Company(id: "c-mtea", name: "MTEA BV", domains: ["mtea.be"])])
+        let (match, _) = Matcher(ownDomain: "mtea.be", excluded: []).match(app: "Mail", title: "Inbox – MTEA", host: "")
+        XCTAssertFalse(match.isAssigned)
+    }
+
+    func testExcludedSupplierIsNotRecognised() {
+        let (match, _) = Matcher(excluded: ["c-janssen"]).match(app: "Safari", title: "", host: "janssen.be")
+        XCTAssertFalse(match.isAssigned)
+    }
+
+    func testGenericToolsAreNeverLearnedOrMatched() {
+        XCTAssertTrue(Matcher.isGeneric("docs.google.com"))
+        XCTAssertTrue(Matcher.isGeneric("www.canva.com"))
+        XCTAssertFalse(Matcher.isGeneric("janssen.be"))
+        XCTAssertFalse(Matcher.isGeneric("klant.co.uk"))
+    }
+
+    func testDefaultInvoiceableComesFromTeamleaderPreference() {
+        let (match, _) = Matcher(excluded: [], defaultInvoiceable: false).match(app: "Safari", title: "", host: "janssen.be")
+        XCTAssertFalse(match.invoiceable)
     }
 }

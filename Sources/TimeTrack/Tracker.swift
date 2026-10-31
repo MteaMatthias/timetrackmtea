@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Darwin
 import IOKit.pwr_mgt
 
 /// Registreert elke paar seconden het actieve programma, de venstertitel en (bij browsers) het domein.
@@ -92,18 +93,19 @@ final class Tracker: ObservableObject {
         if sleeping || screenLocked { statusText = "Scherm vergrendeld"; lastKey = nil; return }
         guard let window = Self.activeWindow() else { statusText = "Geen actief venster"; lastKey = nil; return }
 
+        let idle = Self.idleSeconds()
+        // Een videocall of presentatie zonder muis/toetsenbord is geen inactiviteit (maximaal 2 uur).
+        let isIdle = idle >= idleAfter && !(idle < 2 * 3600 && Self.callOrPresentationActive(frontmost: window.bundle))
+
         // Tijd in TimeTrack zelf (voorstellen nakijken) hoort bij het vorige blok.
-        if window.bundle == Bundle.main.bundleIdentifier, lastKey != nil {
+        if window.bundle == Bundle.main.bundleIdentifier, lastKey != nil, !isIdle {
             Database.shared.run("UPDATE activity SET end=? WHERE id=?", now, lastId)
             return
         }
 
-        let idle = Self.idleSeconds()
-        // Een videocall of presentatie zonder muis/toetsenbord is geen inactiviteit.
-        let isIdle = idle >= idleAfter && !Self.displaySleepPrevented()
         let app = isIdle ? Store.idleApp : window.app
         let title = isIdle ? "" : window.title
-        let host = isIdle ? "" : (Browser.currentHost(bundleId: window.bundle) ?? "")
+        let host = isIdle ? "" : (Browser.host(bundleId: window.bundle) ?? "")
         let key = [app, title, host].joined(separator: "\u{1}")
         statusText = isIdle ? "Inactief" : [app, host.isEmpty ? title : host].filter { !$0.isEmpty }.joined(separator: " — ")
 
@@ -115,7 +117,8 @@ final class Tracker: ObservableObject {
         } else {
             var start = contiguous ? lastTick : now
             if isIdle && contiguous {
-                start = max(lastStart, now - idle)
+                // Ook blokken die tijdens de inactiviteit ontstonden (titelwissels) worden ingekort.
+                start = now - idle
                 trimIdle(since: start)
             }
             lastId = db.run("INSERT INTO activity(start, end, app, bundle, title, host) VALUES (?,?,?,?,?,?)",
@@ -147,37 +150,100 @@ final class Tracker: ObservableObject {
         CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
     }
 
-    /// True wanneer een programma (Teams, Zoom, Meet in de browser, Keynote…) het scherm wakker houdt.
-    static func displaySleepPrevented() -> Bool {
-        var status: Unmanaged<CFDictionary>?
-        guard IOPMCopyAssertionsStatus(&status) == kIOReturnSuccess,
-              let dict = status?.takeRetainedValue() as? [String: Int] else { return false }
-        return (dict["PreventUserIdleDisplaySleep"] ?? 0) > 0
+    /// Programma's waarvan een "scherm wakker houden" altijd op een call wijst, ook op de achtergrond.
+    private static let callApps = ["zoom.us", "Microsoft Teams", "MSTeams", "FaceTime", "Webex", "Slack", "Around"]
+
+    /// True wanneer het actieve programma (bv. Meet in de browser, Keynote) of een call-app het scherm wakker
+    /// houdt. Een video in een ander venster, caffeinate of Amphetamine tellen niet.
+    static func callOrPresentationActive(frontmost bundleId: String) -> Bool {
+        var byProcess: Unmanaged<CFDictionary>?
+        guard IOPMCopyAssertionsByProcess(&byProcess) == kIOReturnSuccess,
+              let dict = byProcess?.takeRetainedValue() as? [NSNumber: [[String: Any]]] else { return false }
+        let frontPath = NSWorkspace.shared.frontmostApplication?.bundleURL?.path
+        for (pid, assertions) in dict {
+            let keepsDisplayOn = assertions.contains {
+                ($0["AssertType"] as? String) == "PreventUserIdleDisplaySleep"
+                    || ($0["AssertionTrueType"] as? String) == "PreventUserIdleDisplaySleep"
+            }
+            guard keepsDisplayOn, let path = processPath(pid.int32Value) else { continue }
+            if let frontPath, path.hasPrefix(frontPath) { return true }
+            if callApps.contains(where: { path.contains("/\($0).app/") }) { return true }
+        }
+        return false
+    }
+
+    private static func processPath(_ pid: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return String(cString: buffer)
     }
 }
 
-/// Leest het domein van het actieve tabblad in gangbare browsers (vraagt eenmalig toestemming per browser).
+/// Leest het domein van het actieve tabblad in gangbare browsers (macOS vraagt eenmalig toestemming per browser).
+/// Het opvragen gebeurt op de achtergrond met een korte time-out, zodat een hangende browser TimeTrack niet
+/// blokkeert; de tracker gebruikt het laatst gekende domein. Incognito-/privévensters van Chromium-browsers
+/// worden overgeslagen.
 enum Browser {
-    private static let scripts: [String: String] = [
-        "com.apple.Safari": "tell application id \"com.apple.Safari\" to get URL of front document",
-        "com.google.Chrome": "tell application id \"com.google.Chrome\" to get URL of active tab of front window",
-        "com.microsoft.edgemac": "tell application id \"com.microsoft.edgemac\" to get URL of active tab of front window",
-        "com.brave.Browser": "tell application id \"com.brave.Browser\" to get URL of active tab of front window",
-        "company.thebrowser.Browser": "tell application id \"company.thebrowser.Browser\" to get URL of active tab of front window",
-        "com.vivaldi.Vivaldi": "tell application id \"com.vivaldi.Vivaldi\" to get URL of active tab of front window",
-    ]
-    private static var compiled: [String: NSAppleScript] = [:]
+    private static let chromium = ["com.google.Chrome", "com.microsoft.edgemac", "com.brave.Browser",
+                                   "company.thebrowser.Browser", "com.vivaldi.Vivaldi"]
+    private static let queue = DispatchQueue(label: "be.mtea.timetrack.browser")
+    private static let lock = NSLock()
+    private static var cache: [String: String] = [:]
+    private static var running = false
 
     static var isEnabled: Bool { !UserDefaults.standard.bool(forKey: "browserDisabled") }
 
-    /// Enkel het domein (bv. "janssen.be") wordt bewaard, nooit het volledige adres.
-    static func currentHost(bundleId: String) -> String? {
-        guard isEnabled, let source = scripts[bundleId] else { return nil }
-        let script = compiled[bundleId] ?? NSAppleScript(source: source)
-        compiled[bundleId] = script
-        var error: NSDictionary?
-        guard let url = script?.executeAndReturnError(&error).stringValue,
-              let host = URL(string: url)?.host?.lowercased() else { return nil }
+    /// Laatst gekend domein voor deze browser (bv. "janssen.be"), en start op de achtergrond een nieuwe lezing.
+    static func host(bundleId: String) -> String? {
+        guard isEnabled, let script = script(for: bundleId) else { return nil }
+        lock.lock()
+        let known = cache[bundleId]
+        let busy = running
+        if !busy { running = true }
+        lock.unlock()
+        if !busy {
+            queue.async {
+                let host = read(script)
+                lock.lock()
+                cache[bundleId] = host ?? ""
+                running = false
+                lock.unlock()
+            }
+        }
+        return known?.isEmpty == false ? known : nil
+    }
+
+    private static func script(for bundleId: String) -> String? {
+        if bundleId == "com.apple.Safari" {
+            return "with timeout of 2 seconds\ntell application id \"com.apple.Safari\" to get URL of front document\nend timeout"
+        }
+        guard chromium.contains(bundleId) else { return nil }
+        return """
+            with timeout of 2 seconds
+            tell application id "\(bundleId)"
+                try
+                    if mode of front window is "incognito" then return ""
+                end try
+                return URL of active tab of front window
+            end tell
+            end timeout
+            """
+    }
+
+    private static func read(_ script: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let deadline = Date().addingTimeInterval(3)
+        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        if process.isRunning { process.terminate(); return nil }
+        let url = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let host = URL(string: url)?.host?.lowercased() else { return nil }
         return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
     }
 }

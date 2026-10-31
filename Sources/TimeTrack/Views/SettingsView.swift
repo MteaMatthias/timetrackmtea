@@ -1,4 +1,5 @@
 import AppKit
+import EventKit
 import ServiceManagement
 import SwiftUI
 
@@ -142,11 +143,12 @@ struct OnboardingView: View {
         .padding(28)
         .frame(width: 720)
         .onAppear {
-            // Automatisch starten staat standaard aan.
+            // Automatisch starten en de dagelijkse melding staan standaard aan.
             if !UserDefaults.standard.bool(forKey: "launchAtLoginAsked") {
                 UserDefaults.standard.set(true, forKey: "launchAtLoginAsked")
                 try? LaunchAtLogin.set(true)
             }
+            Task { await Reminder.shared.requestPermission() }
         }
     }
 }
@@ -154,6 +156,9 @@ struct OnboardingView: View {
 struct SettingsView: View {
     @EnvironmentObject var teamleader: Teamleader
     @EnvironmentObject var tracker: Tracker
+    @EnvironmentObject var calendar: CalendarSource
+    @EnvironmentObject var appModel: AppModel
+    @State private var excluded: [Company] = []
     @StateObject private var updater = Updater.shared
     @AppStorage("idleMinutes") private var idleMinutes = 5
     @AppStorage("roundTo") private var roundTo = 5
@@ -178,7 +183,44 @@ struct SettingsView: View {
                     Text("15 minuten").tag(15)
                 }
                 Toggle("Agenda gebruiken", isOn: Binding(get: { !calendarDisabled }, set: { calendarDisabled = !$0 }))
+                if calendar.authorized && !calendarDisabled {
+                    DisclosureGroup("Welke agenda's tellen mee?") {
+                        Text("Zet agenda's van collega's, gedeelde of privé-agenda's uit.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        ForEach(calendar.calendars, id: \.calendarIdentifier) { cal in
+                            Toggle(isOn: Binding(
+                                get: { !calendar.excludedCalendars.contains(cal.calendarIdentifier) },
+                                set: { on in
+                                    var set = calendar.excludedCalendars
+                                    if on { set.remove(cal.calendarIdentifier) } else { set.insert(cal.calendarIdentifier) }
+                                    calendar.excludedCalendars = set
+                                    appModel.changed()
+                                })) {
+                                Text("\(cal.title)  ").foregroundColor(Color(cal.color))
+                                    + Text(cal.source.title).foregroundColor(.secondary).font(.caption)
+                            }
+                        }
+                    }
+                }
                 Toggle("Registratie gepauzeerd", isOn: $tracker.paused)
+            }
+
+            if !excluded.isEmpty {
+                Section("Niet als klant herkend") {
+                    Text("Leveranciers of tools die je met \"Geen klant?\" uitsloot.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ForEach(excluded) { company in
+                        HStack {
+                            Text(company.name)
+                            Spacer()
+                            Button("Terugzetten") {
+                                Matcher.exclude(companyId: company.id, false)
+                                loadExcluded()
+                                appModel.changed()
+                            }
+                        }
+                    }
+                }
             }
 
             Section("Updates") {
@@ -229,6 +271,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .onAppear {
+            loadExcluded()
             portalURL = teamleader.portalURL
             useCustomClient = teamleader.useCustomClient
             clientId = teamleader.clientId
@@ -236,5 +279,11 @@ struct SettingsView: View {
         .onDisappear {
             if useCustomClient && !clientSecret.isEmpty { teamleader.clientSecret = clientSecret }
         }
+        .onChange(of: appModel.revision) { _ in loadExcluded() }
+    }
+
+    private func loadExcluded() {
+        let ids = Matcher.excludedCompanies
+        excluded = Store.companies().filter { ids.contains($0.id) }.sorted { $0.name < $1.name }
     }
 }

@@ -132,7 +132,7 @@ final class Reminder: NSObject, UNUserNotificationCenterDelegate {
             let (lo, hi) = Store.dayBounds(now)
             guard Teamleader.shared.isConnected,
                   let registered = try? await Teamleader.shared.registered(from: lo, to: hi) else { return }
-            let matcher = Matcher(ownDomain: UserDefaults.standard.string(forKey: "tlOwnDomain"))
+            let matcher = Matcher.current()
             let plan = Planner.plan(day: now, registered: registered, matcher: matcher, roundTo: Prefs.roundTo)
             guard plan.proposedSeconds >= 15 * 60 else { return }
             let clients = Set(plan.proposals.filter { $0.match.isAssigned }.map { $0.match.companyName })

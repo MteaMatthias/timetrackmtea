@@ -33,8 +33,8 @@ struct Match: Hashable {
                   skip: rule.skip)
     }
 
-    init(company: Company) {
-        self.init(companyId: company.id, companyName: company.name)
+    init(company: Company, invoiceable: Bool = true) {
+        self.init(companyId: company.id, companyName: company.name, invoiceable: invoiceable)
     }
 }
 
@@ -48,14 +48,53 @@ final class Matcher {
     private let byName: [(name: String, company: Company)]
     private var cache: [String: (Match, String)] = [:]
 
-    /// Domeinen van mailproviders, tools en sociale media zeggen niets over de klant.
+    /// Domeinen van mailproviders, online tools en sociale media zeggen niets over de klant
+    /// (ook al staan sommige als leverancier in Teamleader). Subdomeinen tellen mee.
     static let genericDomains: Set<String> = [
-        "gmail.com", "googlemail.com", "outlook.com", "outlook.be", "hotmail.com", "hotmail.be", "live.com",
-        "live.be", "msn.com", "icloud.com", "me.com", "mac.com", "yahoo.com", "telenet.be", "skynet.be",
-        "proximus.be", "scarlet.be", "google.com", "microsoft.com", "office.com", "teamleader.eu",
-        "focus.teamleader.eu", "linkedin.com", "facebook.com", "instagram.com", "youtube.com", "apple.com",
-        "github.com", "wordpress.com", "wix.com", "shopify.com", "combell.com", "mtea.be",
+        // mail en internetproviders
+        "gmail.com", "googlemail.com", "outlook.com", "outlook.be", "hotmail.com", "hotmail.be", "hotmail.fr",
+        "live.com", "live.be", "msn.com", "icloud.com", "me.com", "mac.com", "yahoo.com", "yahoo.fr", "aol.com",
+        "telenet.be", "skynet.be", "proximus.be", "scarlet.be", "pandora.be", "orange.fr", "orange.be", "base.be",
+        "protonmail.com", "proton.me", "gmx.com", "gmx.net",
+        // grote platformen en kantoortools
+        "google.com", "google.be", "microsoft.com", "office.com", "office365.com", "live.net", "sharepoint.com",
+        "apple.com", "teamleader.eu", "billit.be", "notion.so", "notion.site", "figma.com", "canva.com", "miro.com",
+        "slack.com", "zoom.us", "webex.com", "atlassian.net", "atlassian.com", "trello.com", "asana.com",
+        "monday.com", "clickup.com", "dropbox.com", "wetransfer.com", "box.com", "chatgpt.com", "openai.com",
+        "claude.ai", "anthropic.com", "deepl.com", "grammarly.com", "loom.com", "calendly.com", "docusign.net",
+        "adobe.com", "mailchimp.com", "hubspot.com", "semrush.com", "mollie.com", "stripe.com", "paypal.com",
+        "github.com", "gitlab.com", "bitbucket.org", "stackoverflow.com", "wordpress.com", "wordpress.org",
+        "wix.com", "shopify.com", "squarespace.com", "webflow.com", "combell.com", "cloudflare.com",
+        // sociaal en media
+        "linkedin.com", "facebook.com", "instagram.com", "x.com", "twitter.com", "youtube.com", "tiktok.com",
+        "pinterest.com", "whatsapp.com", "spotify.com", "netflix.com", "wikipedia.org",
+        // lokaal
+        "localhost",
     ]
+
+    /// Publieke achtervoegsels: "x.co.uk" → klantdomein is "x.co.uk", niet "co.uk".
+    private static let publicSuffixes: Set<String> = [
+        "co.uk", "org.uk", "ac.uk", "com.au", "co.nz", "co.za", "com.br", "co.jp", "github.io", "gitlab.io",
+        "vercel.app", "netlify.app", "herokuapp.com", "azurewebsites.net", "web.app", "firebaseapp.com",
+        "pages.dev", "wixsite.com", "myshopify.com", "wordpress.com", "blogspot.com", "cloudfront.net",
+        "amazonaws.com", "googleusercontent.com",
+    ]
+
+    /// True voor domeinen (of subdomeinen) die nooit een klant aanduiden.
+    static func isGeneric(_ host: String) -> Bool {
+        registrableDomain(host).contains { genericDomains.contains($0) }
+    }
+
+    /// Bedrijven die de gebruiker uitsloot (leveranciers, eigen bedrijf).
+    static var excludedCompanies: Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: "excludedCompanies") ?? [])
+    }
+
+    static func exclude(companyId: String, _ excluded: Bool = true) {
+        var set = excludedCompanies
+        if excluded { set.insert(companyId) } else { set.remove(companyId) }
+        UserDefaults.standard.set(Array(set), forKey: "excludedCompanies")
+    }
 
     /// Woorden die een bedrijfsnaam niet herkenbaar maken in een venstertitel.
     private static let legalForms: Set<String> = [
@@ -63,22 +102,37 @@ final class Matcher {
         "inc", "llc", "bv.", "nv.", "the", "de", "het",
     ]
 
-    init(rules: [Rule] = Store.rules(), companies: [Company] = Store.companies(), ownDomain: String? = nil) {
+    private let defaultInvoiceable: Bool
+
+    /// Matcher met de huidige instellingen (regels, bedrijven, eigen domein, standaard factureerbaar).
+    static func current() -> Matcher {
+        Matcher(defaultInvoiceable: UserDefaults.standard.object(forKey: "tlInvoiceable") as? Bool ?? true)
+    }
+
+    init(rules: [Rule] = Store.rules(), companies: [Company] = Store.companies(),
+         ownDomain: String? = UserDefaults.standard.string(forKey: "tlOwnDomain"),
+         excluded: Set<String> = Matcher.excludedCompanies, defaultInvoiceable: Bool = true) {
+        self.defaultInvoiceable = defaultInvoiceable
         self.rules = rules.map { rule in
             (rule, rule.pattern.split(separator: "|")
                 .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
                 .filter { !$0.isEmpty })
         }
-        var domains: [String: Company] = [:]
+        // Eigen bedrijf en uitgesloten bedrijven (leveranciers) nooit als klant herkennen.
+        let candidates = companies.filter { c in
+            !excluded.contains(c.id) && !(ownDomain.map { c.domains.contains($0) } ?? false)
+        }
+        var owners: [String: [Company]] = [:]
         var names: [(name: String, company: Company)] = []
-        for c in companies {
-            for d in c.domains where !Self.genericDomains.contains(d) && d != ownDomain {
-                domains[d] = domains[d] ?? c
+        for c in candidates {
+            for d in c.domains where !Self.isGeneric(d) && !Self.publicSuffixes.contains(d) {
+                owners[d, default: []].append(c)
             }
             let n = Self.normalize(c.name, stripLegalForms: true)
             if n.count >= 4 { names.append((name: n, company: c)) }
         }
-        byDomain = domains
+        // Een domein van meerdere bedrijven (gedeelde hosting, mailprovider) is niet eenduidig.
+        byDomain = owners.compactMapValues { $0.count == 1 ? $0[0] : nil }
         byName = names.sorted { $0.name.count > $1.name.count }
     }
 
@@ -91,10 +145,11 @@ final class Matcher {
     }
 
     static func registrableDomain(_ host: String) -> [String] {
-        // "app.janssen.be" → ["app.janssen.be", "janssen.be"]
+        // "app.janssen.be" → ["app.janssen.be", "janssen.be"]; nooit enkel een publiek achtervoegsel.
         let parts = host.split(separator: ".")
         guard parts.count > 2 else { return [host] }
         return (0...(parts.count - 2)).map { parts[$0...].joined(separator: ".") }
+            .filter { !publicSuffixes.contains($0) }
     }
 
     /// Match voor een venster. De reden is kort en leesbaar, bv. "website janssen.be".
@@ -121,13 +176,13 @@ final class Matcher {
         }
         if !h.isEmpty {
             for d in Self.registrableDomain(h) {
-                if let c = byDomain[d] { return (Match(company: c), "website \(h)") }
+                if let c = byDomain[d] { return (Match(company: c, invoiceable: defaultInvoiceable), "website \(h)") }
             }
         }
         let normTitle = " " + Self.normalize(title) + " "
         if normTitle.count > 2, let hit = byName.first(where: { normTitle.contains(" \($0.name) ") }) {
             let where_ = title.isEmpty ? app : "‘\(String(title.prefix(40)))’"
-            return (Match(company: hit.company), "\(hit.company.name) in \(where_)")
+            return (Match(company: hit.company, invoiceable: defaultInvoiceable), "\(hit.company.name) in \(where_)")
         }
         return (.unassigned, host.isEmpty ? app : host)
     }
@@ -142,11 +197,11 @@ final class Matcher {
         }
         for email in event.attendeeEmails {
             guard let domain = email.split(separator: "@").last.map(String.init) else { continue }
-            if let c = byDomain[domain] { return (Match(company: c), "afspraak met \(email)") }
+            if let c = byDomain[domain] { return (Match(company: c, invoiceable: defaultInvoiceable), "afspraak met \(email)") }
         }
         let normTitle = " " + Self.normalize(event.title) + " "
         if let hit = byName.first(where: { normTitle.contains(" \($0.name) ") }) {
-            return (Match(company: hit.company), "agenda: \(event.title)")
+            return (Match(company: hit.company, invoiceable: defaultInvoiceable), "agenda: \(event.title)")
         }
         return nil
     }

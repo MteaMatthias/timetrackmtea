@@ -110,10 +110,12 @@ enum Store {
 
     static func replaceCompanies(_ companies: [Company]) {
         guard !companies.isEmpty else { return }
-        Database.shared.run("DELETE FROM companies")
-        for c in companies {
-            Database.shared.run("INSERT OR REPLACE INTO companies(id, name, domains) VALUES (?,?,?)",
-                                c.id, c.name, c.domains.joined(separator: " "))
+        Database.shared.transaction {
+            Database.shared.run("DELETE FROM companies")
+            for c in companies {
+                Database.shared.run("INSERT OR REPLACE INTO companies(id, name, domains) VALUES (?,?,?)",
+                                    c.id, c.name, c.domains.joined(separator: " "))
+            }
         }
     }
 

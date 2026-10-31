@@ -37,15 +37,38 @@ final class CalendarSource: ObservableObject {
         await MainActor.run { self.authorized = Self.isAuthorized }
     }
 
-    /// Afspraken die je niet geweigerd hebt en waarvoor je als "bezet" staat; geen hele-dag-items.
+    /// Agenda's die meetellen: geen abonnementen of verjaardagen, geen agenda's die de gebruiker uitzette.
+    var calendars: [EKCalendar] {
+        guard Self.isAuthorized else { return [] }
+        return store.calendars(for: .event).filter { $0.type != .subscription && $0.type != .birthday }
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    }
+
+    var excludedCalendars: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "excludedCalendars") ?? []) }
+        set {
+            objectWillChange.send()
+            UserDefaults.standard.set(Array(newValue), forKey: "excludedCalendars")
+        }
+    }
+
+    /// Afspraken waarvoor je als "bezet" staat en die je zelf organiseerde of aanvaardde
+    /// (geen onbeantwoorde of geweigerde uitnodigingen, geen hele-dag-items).
     func events(from lo: Double, to hi: Double) -> [CalendarEvent] {
         guard isEnabled else { return [] }
+        let excluded = excludedCalendars
+        let selected = calendars.filter { !excluded.contains($0.calendarIdentifier) }
+        guard !selected.isEmpty else { return [] }
         let predicate = store.predicateForEvents(withStart: Date(timeIntervalSince1970: lo),
-                                                 end: Date(timeIntervalSince1970: hi), calendars: nil)
+                                                 end: Date(timeIntervalSince1970: hi), calendars: selected)
         return store.events(matching: predicate).compactMap { e -> CalendarEvent? in
             guard !e.isAllDay, e.availability != .free else { return nil }
             let attendees = e.attendees ?? []
-            if attendees.contains(where: { $0.isCurrentUser && $0.participantStatus == .declined }) { return nil }
+            if !attendees.isEmpty {
+                let organizer = e.organizer?.isCurrentUser ?? false
+                let accepted = attendees.contains { $0.isCurrentUser && $0.participantStatus == .accepted }
+                guard organizer || accepted else { return nil }
+            }
             let emails = attendees.filter { !$0.isCurrentUser }.compactMap { p -> String? in
                 let s = p.url.absoluteString
                 return s.lowercased().hasPrefix("mailto:") ? String(s.dropFirst(7)).lowercased() : nil

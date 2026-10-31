@@ -8,6 +8,7 @@ struct Registered: Identifiable, Hashable {
     let companyId: String?
     let companyName: String
     let description: String
+    var day: String? = nil      // yyyy-MM-dd (voor registraties zonder tijdstip)
 
     var end: Double? { start.map { $0 + duration } }
 }
@@ -22,7 +23,8 @@ struct Proposal: Identifiable, Hashable {
     var description: String
     var learnPattern: String    // kandidaat voor een correctieregel (domein of programma)
 
-    var id: String { "\(Int(start))-\(Int(end))" }
+    /// Blijft gelijk terwijl het lopende blok langer wordt, zodat bewerkingen op een kaart niet verloren gaan.
+    var id: String { "\(Int(start))|\(match.key)" }
     var duration: Double { end - start }
 }
 
@@ -73,18 +75,26 @@ enum Planner {
         var length: Int { to - from }
     }
 
-    static func plan(day: Date, registered: [Registered], matcher: Matcher = Matcher(), roundTo: Int = 5) -> DayPlan {
+    static let calendarActivityMargin = 15.0 * 60
+
+    /// - Parameters:
+    ///   - events: afspraken (nil = uit de agenda's op deze Mac); voor tests in te vullen.
+    ///   - dismissed: genegeerde periodes (nil = uit de database).
+    static func plan(day: Date, registered: [Registered], matcher: Matcher = Matcher(), roundTo: Int = 5,
+                     events: [CalendarEvent]? = nil, dismissed: [(Double, Double)]? = nil) -> DayPlan {
         let (lo, hi) = Store.dayBounds(day)
         let n = max(1, Int(((hi - lo) / 60).rounded()))
         var minutes = [[String: Info]](repeating: [:], count: n)
         var forced = [String?](repeating: nil, count: n)
+        var skippedSeconds = [Double](repeating: 0, count: n)
         var matches: [String: Match] = [:]
         var activity: [TimelineBlock] = []
 
         func index(_ t: Double) -> Int { min(n - 1, max(0, Int((t - lo) / 60))) }
 
         // 1. Activiteit op de laptop
-        for seg in Store.segments(from: lo, to: hi) where !seg.isIdle {
+        let segments = Store.segments(from: lo, to: hi).filter { !$0.isIdle }
+        for seg in segments {
             let (m, reason) = matcher.match(app: seg.app, title: seg.title, host: seg.host)
             let label = m.skip ? "Genegeerd" : (m.isAssigned ? m.companyName : "Niet toegewezen")
             let kind: TimelineBlock.Kind = m.skip ? .skipped : (m.isAssigned ? .assigned : .unassigned)
@@ -93,7 +103,17 @@ enum Planner {
             } else {
                 activity.append(TimelineBlock(id: activity.count, start: seg.start, end: seg.end, label: label, kind: kind))
             }
-            if m.skip { continue }
+            if m.skip {
+                var t = seg.start
+                while t < seg.end {
+                    let i = index(t)
+                    let next = min(seg.end, lo + Double(i + 1) * 60)
+                    guard next > t else { break }
+                    skippedSeconds[i] += next - t
+                    t = next
+                }
+                continue
+            }
             matches[m.key] = m
             let what = seg.host.isEmpty ? (seg.title.isEmpty ? seg.app : "\(seg.app): \(seg.title)") : "\(seg.app): \(seg.host)"
             let learn = seg.host.isEmpty ? seg.app : seg.host
@@ -113,24 +133,40 @@ enum Planner {
             }
         }
 
-        // 2. Afspraken in de agenda: altijd werk, ook zonder muis of toetsenbord
-        for event in CalendarSource.shared.events(from: lo, to: hi) {
+        // 2. Afspraken in de agenda: werk, ook zonder muis of toetsenbord. Voorwaarden:
+        //    - een klant herkend of andere deelnemers (een eigen blok "focus" telt niet),
+        //    - de Mac werd rond die tijd gebruikt (geen feestdag of vrije dag met een terugkerende afspraak).
+        //    Bij overlap wint een afspraak met herkende klant; een afspraak zonder klant overschrijft
+        //    geen herkend werk op de laptop.
+        let allEvents = events ?? CalendarSource.shared.events(from: lo, to: hi)
+        let matchedEvents = allEvents.compactMap { event -> (CalendarEvent, Match, String)? in
             let hit = matcher.match(event: event)
-            guard hit != nil || !event.attendeeEmails.isEmpty else { continue }
+            guard hit != nil || !event.attendeeEmails.isEmpty else { return nil }
             let m = hit?.0 ?? .unassigned
-            if m.skip { continue }
+            guard !m.skip else { return nil }
+            let usedMac = segments.contains {
+                $0.end > event.start - calendarActivityMargin && $0.start < event.end + calendarActivityMargin
+            }
+            guard usedMac else { return nil }
+            return (event, m, hit?.1 ?? "agenda: \(event.title)")
+        }.sorted { a, b in (a.1.isAssigned ? 1 : 0) < (b.1.isAssigned ? 1 : 0) }
+        for (event, m, reason) in matchedEvents {
             matches[m.key] = m
-            let reason = hit?.1 ?? "agenda: \(event.title)"
             let first = index(event.start)
             let last = min(n, Int(((event.end - lo) / 60).rounded(.up)))
             guard first < last else { continue }
             for i in first..<last {
+                if !m.isAssigned {
+                    let assignedActivity = minutes[i].filter { !$0.key.isEmpty }.values.reduce(0) { $0 + $1.seconds }
+                    if assignedActivity >= 30 { continue }
+                }
                 forced[i] = m.key
                 var info = minutes[i][m.key] ?? Info()
                 info.seconds = max(info.seconds, 60)
                 info.reasons[reason, default: 0] += 60
                 info.activities["Afspraak: \(event.title)", default: 0] += 60
                 info.descriptions[event.title, default: 0] += 60
+                info.learn[event.title, default: 0] += 60
                 minutes[i][m.key] = info
             }
         }
@@ -158,7 +194,7 @@ enum Planner {
             if i0 < i1 { for i in i0..<i1 { covered[i] = true } }
         }
         for r in registered { if let s = r.start, let e = r.end { cover(s, e) } }
-        for (a, b) in Store.dismissed(from: lo, to: hi) { cover(a, b) }
+        for (a, b) in dismissed ?? Store.dismissed(from: lo, to: hi) { cover(a, b) }
 
         func runs() -> [Run] {
             var out: [Run] = []
@@ -174,12 +210,13 @@ enum Planner {
         }
 
         // 5. Gladstrijken
-        // a. korte pauzes (koffie, telefoon) binnen hetzelfde werk overbruggen
+        // a. korte pauzes (koffie, telefoon) binnen hetzelfde werk overbruggen, maar geen privé-minuten
         var i = 0
         while i < n {
             guard keyAt[i] == nil, !covered[i] else { i += 1; continue }
             var j = i
-            while j < n, keyAt[j] == nil, !covered[j] { j += 1 }
+            while j < n, keyAt[j] == nil, !covered[j], skippedSeconds[j] < minSecondsPerMinute { j += 1 }
+            if j == i { i += 1; continue }
             if j - i <= bridgeMinutes, i > 0, j < n, !covered[i - 1], !covered[j],
                let k = keyAt[i - 1], keyAt[j] == k {
                 for x in i..<j { keyAt[x] = k }
@@ -244,6 +281,27 @@ enum Planner {
                 description: match.description.isEmpty ? (top(info.descriptions, 1).first?.0 ?? "") : match.description,
                 learnPattern: top(info.learn, 1).first?.0 ?? ""))
         }
+
+        // 7. Registraties in Teamleader zonder tijdstip (enkel duur) aftrekken: eerst bij dezelfde klant,
+        //    dan bij niet-herkend werk, dan bij de rest; telkens van het einde van het laatste voorstel.
+        for entry in registered where entry.start == nil {
+            var remaining = entry.duration
+            let companyId = entry.companyId
+            let order = proposals.indices.sorted { a, b in
+                func rank(_ p: Proposal) -> Int {
+                    if companyId != nil && p.match.companyId == companyId { return 0 }
+                    return p.match.isAssigned ? 2 : 1
+                }
+                let ra = rank(proposals[a]), rb = rank(proposals[b])
+                return ra != rb ? ra < rb : proposals[a].start > proposals[b].start
+            }
+            for k in order where remaining > 0 {
+                let take = min(remaining, proposals[k].duration)
+                proposals[k].end -= take
+                remaining -= take
+            }
+        }
+        proposals.removeAll { $0.duration < Double(minProposalMinutes * 60) }
 
         return DayPlan(worked: worked, proposals: proposals, registered: registered, activity: activity)
     }

@@ -11,6 +11,15 @@ final class DayModel: ObservableObject {
     /// False als de registraties uit Teamleader niet opgehaald konden worden: dan niets registreren.
     @Published private(set) var registeredLoaded = false
     @Published var error: String?
+    /// Aanpassingen op kaartjes (klant, omschrijving, tijden…), per voorstel-id; overleven het herladen.
+    @Published var edits: [String: Proposal] = [:]
+
+    var dismissedCount: Int {
+        let (lo, hi) = Store.dayBounds(day)
+        return Store.dismissed(from: lo, to: hi).count
+    }
+
+    func proposalToRegister(_ p: Proposal) -> Proposal { edits[p.id] ?? p }
 
     func reload() async {
         let (lo, hi) = Store.dayBounds(day)
@@ -28,8 +37,10 @@ final class DayModel: ObservableObject {
                 self.error = error.localizedDescription
             }
         }
-        let matcher = Matcher(ownDomain: UserDefaults.standard.string(forKey: "tlOwnDomain"))
+        let matcher = Matcher.current()
         plan = Planner.plan(day: day, registered: registered, matcher: matcher, roundTo: Prefs.roundTo)
+        let ids = Set(plan.proposals.map(\.id))
+        edits = edits.filter { ids.contains($0.key) }
     }
 }
 
@@ -69,10 +80,14 @@ struct TodayView: View {
             }
             .padding(20)
         }
-        .task(id: model.day) { await model.reload() }
+        .task(id: model.day) {
+            model.edits = [:]
+            await model.reload()
+        }
         .onChange(of: appModel.revision) { _ in Task { await model.reload() } }
         .onReceive(Timer.publish(every: 120, on: .main, in: .common).autoconnect()) { _ in
-            if Calendar.current.isDateInToday(model.day), !busy { Task { await model.reload() } }
+            // Niet herladen terwijl iemand een voorstel aan het aanpassen is.
+            if Calendar.current.isDateInToday(model.day), !busy, model.edits.isEmpty { Task { await model.reload() } }
         }
     }
 
@@ -119,7 +134,7 @@ struct TodayView: View {
 
     @ViewBuilder
     private var proposalsSection: some View {
-        let ready = model.plan.proposals.filter { $0.match.isAssigned }
+        let ready = model.plan.proposals.map(model.proposalToRegister).filter { $0.match.isAssigned }
         HStack {
             Text("Voorstellen").font(.title2.weight(.semibold))
             Spacer()
@@ -143,9 +158,22 @@ struct TodayView: View {
                     await register(edited, learn: learn)
                 } onDismiss: {
                     Store.dismiss(start: proposal.start, end: proposal.end)
+                    model.edits[proposal.id] = nil
                     Task { await model.reload() }
                 }
             }
+        }
+        if model.dismissedCount > 0 {
+            HStack {
+                Text("\(model.dismissedCount) genegeerd voorstel(len) op deze dag.").foregroundStyle(.secondary)
+                Button("Terugzetten") {
+                    let (lo, hi) = Store.dayBounds(model.day)
+                    Store.undismiss(from: lo, to: hi)
+                    Task { await model.reload() }
+                }
+                .buttonStyle(.link)
+            }
+            .font(.callout)
         }
         if let limit = teamleader.historicLimitHours,
            let oldest = model.plan.proposals.map(\.start).min(),
@@ -161,8 +189,9 @@ struct TodayView: View {
         defer { busy = false }
         do {
             _ = try await teamleader.addTime(start: p.start, end: p.end, match: p.match, description: p.description,
-                                             invoiceable: p.match.invoiceable && teamleader.defaultInvoiceable)
+                                             invoiceable: p.match.invoiceable)
             if let learn { Store.save(learn) }
+            model.edits[p.id] = nil
             await model.reload()
             return nil
         } catch {
@@ -177,7 +206,8 @@ struct TodayView: View {
         for p in proposals {
             do {
                 _ = try await teamleader.addTime(start: p.start, end: p.end, match: p.match, description: p.description,
-                                                 invoiceable: p.match.invoiceable && teamleader.defaultInvoiceable)
+                                                 invoiceable: p.match.invoiceable)
+                model.edits[p.id] = nil
             } catch {
                 failed += 1
                 model.error = error.localizedDescription
@@ -237,14 +267,16 @@ struct ProposalCard: View {
         self.canRegister = canRegister
         self.onRegister = onRegister
         self.onDismiss = onDismiss
-        _proposal = State(initialValue: proposal)
+        _proposal = State(initialValue: DayModel.shared.edits[proposal.id] ?? proposal)
     }
 
     private var clientChanged: Bool { proposal.match.key != original.match.key }
-    /// Enkel een domein of een duidelijk programma is een goede kandidaat om te onthouden.
+    /// Enkel een klantspecifiek domein, programma of afspraaktitel is een goede kandidaat om te onthouden;
+    /// nooit een browser, mailprogramma of algemene site (Gmail, Google Docs, Canva…).
     private var learnable: Bool {
         let p = original.learnPattern
-        return !p.isEmpty && proposal.match.isAssigned && clientChanged && !Self.genericApps.contains(p)
+        return !p.isEmpty && p.count >= 3 && proposal.match.isAssigned && clientChanged
+            && !Self.genericApps.contains(p) && !Matcher.isGeneric(p.lowercased())
     }
     private static let genericApps: Set<String> = [
         "Safari", "Google Chrome", "Microsoft Edge", "Brave Browser", "Arc", "Firefox", "Finder", "Mail",
@@ -274,6 +306,14 @@ struct ProposalCard: View {
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 6) {
+                        if let companyId = original.match.companyId, !clientChanged {
+                            Button("Geen klant?") {
+                                Matcher.exclude(companyId: companyId)
+                                AppModel.shared.changed()
+                            }
+                            .buttonStyle(.link)
+                            .help("\(original.match.companyName) is een leverancier of tool, geen klant: niet meer automatisch herkennen.")
+                        }
                         Button(working ? "Bezig…" : "Registreer") {
                             Task { await submit() }
                         }
@@ -319,8 +359,14 @@ struct ProposalCard: View {
             }
             .padding(6)
         }
-        .onChange(of: proposal.match.companyName) { _ in
-            remember = learnable && original.learnPattern.contains(".")
+        .onChange(of: proposal) { edited in
+            // Bewaar aanpassingen in het model, zodat herladen of "Registreer alle" ze niet verliest.
+            DayModel.shared.edits[original.id] = edited == original ? nil : edited
+            if !learnable { remember = false }
+        }
+        .onChange(of: original) { fresh in
+            // Nieuw berekend voorstel (bv. lopend blok werd langer): overnemen als er niets aangepast is.
+            if DayModel.shared.edits[fresh.id] == nil { proposal = fresh }
         }
     }
 

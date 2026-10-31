@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import Network
 import Security
@@ -125,10 +126,14 @@ final class Teamleader: ObservableObject {
 
     private func connectViaPortal() async throws {
         let state = UUID().uuidString
+        // Zoals PKCE: enkel deze app kent de verifier, dus enkel zij kan het ticket inwisselen
+        // (ook als een ander programma timetrack:// zou onderscheppen).
+        let verifier = Self.base64url(Data((0..<32).map { _ in UInt8.random(in: 0...255) }))
+        let challenge = Self.base64url(Data(SHA256.hash(data: Data(verifier.utf8))))
         guard var url = URLComponents(string: portalURL + "/timetrack/koppel") else {
             throw TLError.auth("ongeldig portaaladres")
         }
-        url.queryItems = [URLQueryItem(name: "state", value: state)]
+        url.queryItems = [URLQueryItem(name: "state", value: state), URLQueryItem(name: "challenge", value: challenge)]
         NSWorkspace.shared.open(url.url!)
 
         let callback = try await waitForCallback()
@@ -137,7 +142,12 @@ final class Teamleader: ObservableObject {
         guard value("state") == state else { throw TLError.auth("onverwacht antwoord (state)") }
         if let error = value("error") { throw TLError.auth(error) }
         guard let ticket = value("ticket") else { throw TLError.auth("geen ticket ontvangen") }
-        try storeTokens(try await portalPost("/api/timetrack/token", ["ticket": ticket]))
+        try storeTokens(try await portalPost("/api/timetrack/token", ["ticket": ticket, "verifier": verifier]))
+    }
+
+    private static func base64url(_ data: Data) -> String {
+        data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 
     private func connectWithOwnClient() async throws {
@@ -305,7 +315,8 @@ final class Teamleader: ObservableObject {
                 out.append(Registered(
                     id: id, start: start, duration: duration, companyId: companyId,
                     companyName: companyId.flatMap(Store.companyName(id:)) ?? Self.subjectLabel(subject?["type"] as? String),
-                    description: item["description"] as? String ?? ""))
+                    description: item["description"] as? String ?? "",
+                    day: item["started_on"] as? String))
             }
             if data.count < 100 { break }
         }
@@ -437,7 +448,8 @@ final class Teamleader: ObservableObject {
     private func postJSON(_ url: URL, _ body: [String: String]) async throws -> [String: Any] {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.timeoutInterval = 30
+        // Ruimer dan de time-out van het portaal naar Teamleader (20 s), zodat een vernieuwd token niet verloren gaat.
+        req.timeoutInterval = 60
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)

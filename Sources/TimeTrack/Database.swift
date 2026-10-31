@@ -96,8 +96,19 @@ final class Database {
         ]
         let current = Int(query("PRAGMA user_version").first?.int("user_version") ?? 0)
         for (i, sql) in migrations.enumerated() where i >= current {
-            sqlite3_exec(db, "BEGIN; \(sql) PRAGMA user_version = \(i + 1); COMMIT;", nil, nil, nil)
+            if sqlite3_exec(db, "BEGIN; \(sql) PRAGMA user_version = \(i + 1); COMMIT;", nil, nil, nil) != SQLITE_OK {
+                NSLog("Migratie %d mislukt: %@", i + 1, String(cString: sqlite3_errmsg(db)))
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                break
+            }
         }
+    }
+
+    /// Voert meerdere schrijfacties uit in één transactie (veel sneller, en alles-of-niets).
+    func transaction(_ body: () -> Void) {
+        run("BEGIN")
+        body()
+        run("COMMIT")
     }
 
     @discardableResult
