@@ -11,7 +11,10 @@ final class Database {
     static let shared = Database()
 
     static var directory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        if let dir = ProcessInfo.processInfo.environment["TIMETRACK_DATA_DIR"] {
+            return URL(fileURLWithPath: dir, isDirectory: true)
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TimeTrack", isDirectory: true)
     }
 

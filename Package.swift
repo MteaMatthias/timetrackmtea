@@ -9,6 +9,11 @@ let package = Package(
             name: "TimeTrack",
             path: "Sources/TimeTrack",
             linkerSettings: [.linkedLibrary("sqlite3")]
-        )
+        ),
+        .testTarget(
+            name: "TimeTrackTests",
+            dependencies: ["TimeTrack"],
+            path: "Tests/TimeTrackTests"
+        ),
     ]
 )
