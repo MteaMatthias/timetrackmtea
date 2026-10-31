@@ -136,7 +136,7 @@ final class Matcher {
     func match(event: CalendarEvent) -> (Match, String)? {
         let t = event.title.lowercased()
         for item in rules where item.rule.field != "app" {
-            if let term = item.terms.first(where: { t.contains($0) }) {
+            if item.terms.contains(where: { t.contains($0) }) {
                 return (Match(rule: item.rule), "agenda: \(event.title)")
             }
         }
