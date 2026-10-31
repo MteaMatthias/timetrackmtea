@@ -71,11 +71,7 @@ GitHub Actions doet bij elke push:
 - `swift test` (tests voor het dagvoorstel en de klantherkenning),
 - daarna de bouw van een universele `TimeTrack.zip`.
 
-Een tag `v1.2.3` publiceert een release met `TimeTrack.zip` en `install.sh`. De app en het installatiescript halen altijd de laatste release.
-
-```bash
-git tag v0.3.0 && git push origin v0.3.0
-```
+Een release maak je op GitHub via **Actions → Build → Run workflow**: vul een versienummer in, bijvoorbeeld `0.3.0`. Een tag `v0.3.0` pushen werkt ook. De release bevat `TimeTrack.zip` en `install.sh`. De app en het installatiescript halen altijd de laatste release; medewerkers krijgen in de app een melding "Nieuwe versie beschikbaar".
 
 ### Vast certificaat (aanbevolen)
 Zonder vast certificaat ziet macOS elke update als een andere app. Dan moet je na elke update opnieuw toestemming geven voor Toegankelijkheid en de sleutelhanger.
