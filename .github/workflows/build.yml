@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -21,9 +21,28 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
           else
-            echo "VERSION=0.1.${{ github.run_number }}" >> "$GITHUB_ENV"
+            echo "VERSION=0.0.${{ github.run_number }}" >> "$GITHUB_ENV"
           fi
           echo "BUILD=${{ github.run_number }}" >> "$GITHUB_ENV"
+
+      - name: Ondertekeningscertificaat importeren
+        env:
+          CERT_P12: ${{ secrets.SIGNING_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        if: env.CERT_P12 != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p ci "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p ci "$KEYCHAIN"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # Zelfondertekend: als vertrouwd markeren voor codesigning op de build-machine.
+          openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -clcerts -nokeys -passin "pass:$CERT_PASSWORD" -out "$RUNNER_TEMP/cert.pem" || true
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem" || true
+          security find-identity -p codesigning
 
       - name: App bouwen
         run: ./scripts/build-app.sh
@@ -32,10 +51,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: TimeTrack-${{ env.VERSION }}
-          path: build/TimeTrack-${{ env.VERSION }}.zip
+          path: build/TimeTrack.zip
 
       - name: Release publiceren (bij een tag v*)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "build/TimeTrack-$VERSION.zip" --title "TimeTrack $VERSION" --generate-notes
+        run: |
+          gh release create "$GITHUB_REF_NAME" build/TimeTrack.zip scripts/install.sh \
+            --title "TimeTrack $VERSION" --generate-notes

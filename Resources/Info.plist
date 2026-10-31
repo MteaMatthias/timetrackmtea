@@ -15,5 +15,15 @@
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>MTEA</string>
+    <key>NSAppleEventsUsageDescription</key><string>TimeTrack leest het adres van de website die je bekijkt (enkel het domein wordt bewaard) om de juiste klant voor te stellen.</string>
+    <key>NSCalendarsUsageDescription</key><string>Vergaderingen in je agenda tellen als gewerkte tijd en helpen de klant herkennen.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key><string>Vergaderingen in je agenda tellen als gewerkte tijd en helpen de klant herkennen.</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>be.mtea.timetrack</string>
+            <key>CFBundleURLSchemes</key><array><string>timetrack</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>

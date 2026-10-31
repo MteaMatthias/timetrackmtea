@@ -68,6 +68,33 @@ final class Database {
         }
         sqlite3_busy_timeout(db, 5000)
         sqlite3_exec(db, Self.schema, nil, nil, nil)
+        migrate()
+    }
+
+    /// Schema-uitbreidingen, bijgehouden via PRAGMA user_version.
+    private func migrate() {
+        let migrations = [
+            // 1: website (enkel domein) per activiteit, Teamleader-bedrijven, genegeerde voorstellen
+            """
+            ALTER TABLE activity ADD COLUMN host TEXT NOT NULL DEFAULT '';
+            ALTER TABLE rules ADD COLUMN invoiceable INTEGER NOT NULL DEFAULT 1;
+            CREATE TABLE IF NOT EXISTS companies (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                domains TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS dismissed (
+                id INTEGER PRIMARY KEY,
+                start REAL NOT NULL,
+                end REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS dismissed_end ON dismissed(end);
+            """,
+        ]
+        let current = Int(query("PRAGMA user_version").first?.int("user_version") ?? 0)
+        for (i, sql) in migrations.enumerated() where i >= current {
+            sqlite3_exec(db, "BEGIN; \(sql) PRAGMA user_version = \(i + 1); COMMIT;", nil, nil, nil)
+        }
     }
 
     @discardableResult

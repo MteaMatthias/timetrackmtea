@@ -1,6 +1,6 @@
 import SwiftUI
 
-private let fieldLabels = ["title": "Venstertitel bevat", "app": "Programma bevat", "any": "Programma of titel bevat"]
+private let fieldLabels = ["any": "Programma, titel of website bevat", "title": "Titel of website bevat", "app": "Programma bevat"]
 
 struct RulesView: View {
     @EnvironmentObject var model: AppModel
@@ -10,7 +10,7 @@ struct RulesView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Regels koppelen activiteiten automatisch aan een klant. Ze gelden ook voor tijd die al geregistreerd is.")
+                Text("Klanten worden automatisch herkend via Teamleader (naam, website, e-maildomein). Hier corrigeer je wat verkeerd of niet herkend wordt, of negeer je privé-activiteit.")
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Nieuwe regel") { editing = Rule() }.buttonStyle(.borderedProminent)
@@ -22,7 +22,7 @@ struct RulesView: View {
                 TableColumn("Klant") { r in Text(r.targetLabel).foregroundStyle(r.skip ? .secondary : .primary) }
                 TableColumn("Werksoort") { r in Text(r.workTypeName.isEmpty ? "—" : r.workTypeName) }
                     .width(min: 80, ideal: 110)
-                TableColumn("Omschrijving") { r in Text(r.description.isEmpty ? "(venstertitels)" : r.description).lineLimit(1) }
+                TableColumn("Factureerbaar") { r in Image(systemName: r.invoiceable && !r.skip ? "checkmark" : "minus") }.width(90)
                 TableColumn("") { r in Button("Bewerken…") { editing = r } }.width(90)
             }
             Text("Volgorde: titelregels gaan voor programmaregels; bij meerdere treffers wint het langste patroon.")
@@ -53,22 +53,19 @@ struct RuleEditor: View {
         VStack(spacing: 0) {
             Form {
                 Picker("Voorwaarde", selection: $rule.field) {
-                    ForEach(["title", "app", "any"], id: \.self) { Text(fieldLabels[$0]!).tag($0) }
+                    ForEach(["any", "title", "app"], id: \.self) { Text(fieldLabels[$0]!).tag($0) }
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     TextField("Trefwoorden", text: $rule.pattern)
-                    Text("Hoofdletters maken niet uit. Meerdere trefwoorden scheiden met | (bv. Janssen | JNS-2026). Maak het zo kort mogelijk, bv. enkel de klantnaam.")
+                    Text("Bv. een domein (klantx.be), een projectcode of een naam. Hoofdletters maken niet uit; meerdere trefwoorden scheiden met |.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Toggle("Negeren (privé, niet registreren)", isOn: $rule.skip)
                 if !rule.skip {
                     CompanyField(id: $rule.companyId, name: $rule.companyName)
                     WorkTypePicker(id: $rule.workTypeId, name: $rule.workTypeName)
-                    VStack(alignment: .leading, spacing: 4) {
-                        TextField("Vaste omschrijving (optioneel)", text: $rule.description)
-                        Text("Leeg = de belangrijkste venstertitels worden de omschrijving.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                    TextField("Vaste omschrijving (optioneel)", text: $rule.description)
+                    Toggle("Factureerbaar", isOn: $rule.invoiceable)
                 }
             }
             .formStyle(.grouped)
