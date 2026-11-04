@@ -653,7 +653,8 @@ final class EndToEndTests: XCTestCase {
     }
 
     private func assertAdd(_ add: [String: Any], for r: CallRecord, file: StaticString = #filePath, line: UInt = #line) {
-        let expected = Int(max(60, ((r.end - r.start) / 60).rounded(.up) * 60))
+        // Naar Teamleader gaat de duur naar boven afgerond op 10 min (3 min bellen = 10 min).
+        let expected = Int(Prefs.billed(max(60, ((r.end - r.start) / 60).rounded(.up) * 60)))
         let started = (add["started_at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }?.timeIntervalSince1970
         XCTAssertNotNil(started, "geen started_at: \(add)", file: file, line: line)
         if let started {

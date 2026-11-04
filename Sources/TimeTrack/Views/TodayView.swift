@@ -71,6 +71,9 @@ final class DayModel: ObservableObject {
     /// Starttijd in Teamleader: het eerste blok, maar opgeschoven tot er niets overlapt met wat al in
     /// Teamleader staat (een gebundelde registratie telt de blokken op en zou anders overlappen).
     private func startTime(for p: Proposal, taken: [(Double, Double)]) -> Double {
+        // Een gesprek begint in Teamleader altijd op zijn echte begintijd, ook als de afgeronde duur van een
+        // vorig gesprek (3 min → 10 min) erover loopt.
+        if p.isCall { return p.start }
         var start = p.start
         var moved = true
         while moved {
@@ -89,7 +92,9 @@ final class DayModel: ObservableObject {
     }
 
     /// Maakt de registratie in Teamleader; geeft een foutmelding terug of nil.
-    func register(_ p: Proposal, learn: Rule? = nil) async -> String? {
+    func register(_ worked: Proposal, learn: Rule? = nil) async -> String? {
+        var p = worked
+        p.seconds = Prefs.billed(worked.seconds)
         guard !Self.registering else { return "Er wordt al iets geregistreerd, even geduld." }
         Self.registering = true
         busy = true
@@ -124,7 +129,9 @@ final class DayModel: ObservableObject {
         defer { busy = false; Self.registering = false }
         var failures: [String] = []
         var taken = takenIntervals
-        for p in proposals {
+        for worked in proposals {
+            var p = worked
+            p.seconds = Prefs.billed(worked.seconds)
             do {
                 let start = startTime(for: p, taken: taken)
                 let id = try await Teamleader.shared.addTime(start: start, end: start + p.seconds, match: p.match,
@@ -172,6 +179,19 @@ enum Prefs {
     static var roundTo: Int {
         let v = UserDefaults.standard.integer(forKey: "roundTo")
         return v > 0 ? v : 5
+    }
+
+    /// Naar Teamleader gaat elke registratie naar boven afgerond op dit aantal minuten (standaard 10):
+    /// 3 min bellen = 10 min in Teamleader.
+    static var billRoundTo: Int {
+        let v = UserDefaults.standard.integer(forKey: "billRoundTo")
+        return v > 0 ? v : 10
+    }
+
+    /// De duur die naar Teamleader gaat: naar boven afgerond, minstens één eenheid.
+    static func billed(_ seconds: Double) -> Double {
+        let step = Double(billRoundTo * 60)
+        return max(step, ((seconds - 0.5) / step).rounded(.up) * step)
     }
 }
 
@@ -317,7 +337,7 @@ struct TodayView: View {
                 Button {
                     Task { await model.registerAll(ready) }
                 } label: {
-                    Label("Alles registreren (\(formatDuration(ready.reduce(0) { $0 + $1.seconds })))",
+                    Label("Alles registreren (\(formatDuration(ready.reduce(0) { $0 + Prefs.billed($1.seconds) })))",
                           systemImage: "checkmark.circle.fill")
                 }
                 .buttonStyle(.borderedProminent)
@@ -519,8 +539,13 @@ struct ProposalCard: View {
             }
             Spacer(minLength: 12)
             VStack(alignment: .trailing, spacing: 8) {
-                Text(formatDuration(proposal.seconds))
+                Text(formatDuration(Prefs.billed(proposal.seconds)))
                     .font(.system(size: 26, weight: .semibold, design: .rounded)).monospacedDigit()
+                    .help("Naar boven afgerond op \(Prefs.billRoundTo) min voor Teamleader")
+                if Prefs.billed(proposal.seconds) != proposal.seconds {
+                    Text("\(formatDuration(proposal.seconds)) gewerkt").font(.caption).foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
                 HStack(spacing: 8) {
                     Menu {
                         Button("Negeren (geen werk)") { model.dismiss(original) }
@@ -587,7 +612,7 @@ struct ProposalCard: View {
             WorkTypePicker(id: $proposal.match.workTypeId, name: $proposal.match.workTypeName)
                 .labelsHidden()
                 .frame(width: 160)
-            Stepper(formatDuration(proposal.seconds),
+            Stepper("\(formatDuration(proposal.seconds)) gewerkt",
                     onIncrement: { proposal.seconds += 300 },
                     onDecrement: { if proposal.seconds > 300 { proposal.seconds -= 300 } })
                 .monospacedDigit()

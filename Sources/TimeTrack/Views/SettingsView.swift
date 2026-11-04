@@ -172,6 +172,7 @@ struct SettingsView: View {
     @StateObject private var updater = Updater.shared
     @AppStorage("idleMinutes") private var idleMinutes = 5
     @AppStorage("roundTo") private var roundTo = 5
+    @AppStorage("billRoundTo") private var billRoundTo = 10
     @AppStorage("calendarDisabled") private var calendarDisabled = false
     @AppStorage("bundlePerClient") private var bundlePerClient = true
     @AppStorage("callPromptsDisabled") private var callPromptsDisabled = false
@@ -198,6 +199,16 @@ struct SettingsView: View {
                     Text("5 minuten").tag(5)
                     Text("15 minuten").tag(15)
                 }
+                Picker("In Teamleader naar boven afronden op", selection: $billRoundTo) {
+                    Text("1 minuut").tag(1)
+                    Text("5 minuten").tag(5)
+                    Text("10 minuten").tag(10)
+                    Text("15 minuten").tag(15)
+                    Text("30 minuten").tag(30)
+                }
+                .onChange(of: billRoundTo) { _ in appModel.changed() }
+                Text("Elke registratie gaat naar boven afgerond naar Teamleader: 3 min bellen wordt bij 10 minuten 10 min.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("Agenda gebruiken", isOn: Binding(get: { !calendarDisabled }, set: { calendarDisabled = !$0 }))
                 if calendar.authorized && !calendarDisabled {
                     DisclosureGroup("Welke agenda's tellen mee?") {

@@ -136,7 +136,7 @@ struct MenuContent: View {
                             Avatar(name: p.match.isAssigned ? p.match.companyName : "", size: 24)
                             Text(p.match.isAssigned ? p.match.companyName : "Niet herkend").lineLimit(1)
                             Spacer()
-                            Text(formatDuration(p.seconds)).monospacedDigit().foregroundStyle(.secondary)
+                            Text(formatDuration(Prefs.billed(p.seconds))).monospacedDigit().foregroundStyle(.secondary)
                             if p.match.isAssigned {
                                 Button {
                                     Task { _ = await model.register(model.proposalToRegister(p)) }

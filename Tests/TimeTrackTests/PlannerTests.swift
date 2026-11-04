@@ -550,6 +550,18 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(Describer.describe(activities: []), "Werk voor de klant")
     }
 
+    func testTeamleaderGetsEveryRegistrationRoundedUpToTenMinutes() {
+        UserDefaults.standard.removeObject(forKey: "billRoundTo")
+        XCTAssertEqual(Prefs.billed(180), 600, "3 min bellen = 10 min")
+        XCTAssertEqual(Prefs.billed(30), 600)
+        XCTAssertEqual(Prefs.billed(600), 600, "precies 10 min blijft 10 min")
+        XCTAssertEqual(Prefs.billed(660), 1200, "11 min = 20 min")
+        XCTAssertEqual(Prefs.billed(3540), 3600)
+        UserDefaults.standard.set(15, forKey: "billRoundTo")
+        defer { UserDefaults.standard.removeObject(forKey: "billRoundTo") }
+        XCTAssertEqual(Prefs.billed(180), 900)
+    }
+
     func testPiecesShowWhatHappenedInsideABlock() {
         activity(t(9), t(9, 20), host: "janssen.be")
         activity(t(9, 20), t(9, 40), app: "Microsoft Word", title: "Offerte Janssen.docx")
