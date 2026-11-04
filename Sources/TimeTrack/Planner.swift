@@ -621,6 +621,10 @@ enum Planner {
         }
         proposals.removeAll { !$0.isCall && $0.duration < Double(minProposalMinutes * 60) }
 
+        // Elke registratie heeft een omschrijving voor de klant (Teamleader aanvaardt geen lege).
+        for k in proposals.indices where proposals[k].description.trimmingCharacters(in: .whitespaces).isEmpty {
+            proposals[k].description = Describer.describe(proposals[k])
+        }
         return DayPlan(worked: worked, proposals: proposals, registered: registered, activity: activity)
     }
 }

@@ -97,7 +97,7 @@ final class DayModel: ObservableObject {
         do {
             let start = startTime(for: p, taken: takenIntervals)
             let id = try await Teamleader.shared.addTime(start: start, end: start + p.seconds, match: p.match,
-                                                         description: p.description, invoiceable: p.match.invoiceable)
+                                                         description: Self.text(for: p), invoiceable: p.match.invoiceable)
             Store.savePushed(teamleaderId: id, parts: p.parts)
             if let learn { Store.save(learn) }
             edits[p.id] = nil
@@ -111,6 +111,12 @@ final class DayModel: ObservableObject {
         }
     }
 
+    /// De omschrijving die naar Teamleader gaat: nooit leeg.
+    static func text(for p: Proposal) -> String {
+        let text = p.description.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? Describer.describe(p) : text
+    }
+
     func registerAll(_ proposals: [Proposal]) async {
         guard !Self.registering else { return }
         Self.registering = true
@@ -122,7 +128,7 @@ final class DayModel: ObservableObject {
             do {
                 let start = startTime(for: p, taken: taken)
                 let id = try await Teamleader.shared.addTime(start: start, end: start + p.seconds, match: p.match,
-                                                             description: p.description, invoiceable: p.match.invoiceable)
+                                                             description: Self.text(for: p), invoiceable: p.match.invoiceable)
                 Store.savePushed(teamleaderId: id, parts: p.parts)
                 taken.append((start, start + p.seconds))
                 edits[p.id] = nil
@@ -431,6 +437,9 @@ struct ProposalCard: View {
     @State private var error: String?
     @State private var showDetails = false
     @State private var assigningActivity: String?
+    @State private var aiDescribed = false
+
+    private var missingDescription: Bool { proposal.description.trimmingCharacters(in: .whitespaces).isEmpty }
     @State private var assigning: Proposal.Part?
 
     init(proposal: Proposal, model: DayModel) {
@@ -487,6 +496,13 @@ struct ProposalCard: View {
             // Een vaste chatnaam is altijd specifiek: dan meteen onthouden.
             else if original.learnPattern.contains("-chat ") { remember = true }
         }
+        .task(id: original.id) {
+            // Omschrijving bijschaven met Apple Intelligence, zolang je ze zelf nog niet aanpaste.
+            let base = original.description
+            guard let better = await AIDescriber.improve(original), proposal.description == base else { return }
+            proposal.description = better
+            aiDescribed = true
+        }
         .onChange(of: original) { fresh in
             // Nieuw berekend voorstel (bv. lopend blok werd langer): overnemen als er niets aangepast is.
             if model.edits[fresh.id] == nil { proposal = fresh }
@@ -528,8 +544,9 @@ struct ProposalCard: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .disabled(!model.canRegister || !proposal.match.isAssigned || working)
-                    .help(proposal.match.isAssigned ? "Registreer in Teamleader" : "Kies eerst een klant")
+                    .disabled(!model.canRegister || !proposal.match.isAssigned || working || missingDescription)
+                    .help(!proposal.match.isAssigned ? "Kies eerst een klant"
+                          : missingDescription ? "Vul een korte omschrijving in" : "Registreer in Teamleader")
                 }
             }
         }
@@ -559,8 +576,14 @@ struct ProposalCard: View {
 
     private var editRow: some View {
         HStack(spacing: 10) {
-            TextField("Omschrijving (optioneel)", text: $proposal.description)
+            TextField("Omschrijving voor de klant (verplicht)", text: $proposal.description)
                 .textFieldStyle(.roundedBorder)
+                .overlay(alignment: .trailing) {
+                    if aiDescribed {
+                        Image(systemName: "sparkles").foregroundStyle(.secondary).padding(.trailing, 6)
+                            .help("Voorgesteld door Apple Intelligence op je Mac (er gaat niets naar buiten)")
+                    }
+                }
             WorkTypePicker(id: $proposal.match.workTypeId, name: $proposal.match.workTypeName)
                 .labelsHidden()
                 .frame(width: 160)

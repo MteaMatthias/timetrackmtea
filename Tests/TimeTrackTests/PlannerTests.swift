@@ -525,6 +525,31 @@ final class PlannerTests: XCTestCase {
         XCTAssertNil(ActivityAssignView.learnPattern("Claude"))
     }
 
+    func testEveryProposalGetsAShortDescriptionForTheClient() {
+        activity(t(10, 58), t(11, 5), app: "Mail", title: "Re: Recht van opstal")
+        activity(t(11, 5), t(11, 9), app: "Mail", title: "Alle inkomende – 144.066 berichten, 12.341 ongelezen")
+        activity(t(13), t(14), host: "janssen.be")
+        let p = plan()
+        XCTAssertFalse(p.proposals.isEmpty)
+        for proposal in p.proposals {
+            XCTAssertFalse(proposal.description.trimmingCharacters(in: .whitespaces).isEmpty, "geen omschrijving: \(proposal)")
+        }
+        XCTAssertTrue(p.proposals.contains { $0.description.hasPrefix("Mailverkeer ‘Recht van opstal’") },
+                      p.proposals.map(\.description).description)
+        XCTAssertTrue(p.proposals.contains { $0.description == "Werk aan janssen.be" }, p.proposals.map(\.description).description)
+    }
+
+    func testDescriptionsReadWellForTheClient() {
+        XCTAssertEqual(Describer.describe(activities: ["Telefoon: 0493 29 50 63"]), "Telefoongesprek")
+        XCTAssertEqual(Describer.describe(activities: ["Telefoon: Piet Janssen"]), "Telefoongesprek met Piet Janssen")
+        XCTAssertEqual(Describer.describe(activities: ["Microsoft Word: Offerte dakwerken.docx", "Mail: FW: Re: Planning"]),
+                       "Document ‘Offerte dakwerken’ en mailverkeer ‘Planning’")
+        XCTAssertEqual(Describer.describe(activities: ["Claude: Claude"]), "Uitwerking en analyse")
+        XCTAssertEqual(Describer.describe(activities: ["claude.ai: Nieuwsbrief november"]), "Uitwerking ‘Nieuwsbrief november’")
+        XCTAssertEqual(Describer.describe(activities: ["Google Chrome: youtube.com"]), "Opzoekwerk")
+        XCTAssertEqual(Describer.describe(activities: []), "Werk voor de klant")
+    }
+
     func testPiecesShowWhatHappenedInsideABlock() {
         activity(t(9), t(9, 20), host: "janssen.be")
         activity(t(9, 20), t(9, 40), app: "Microsoft Word", title: "Offerte Janssen.docx")

@@ -34,6 +34,12 @@ jobs:
           fi
           echo "BUILD=${{ github.run_number }}" >> "$GITHUB_ENV"
 
+      - name: Nieuwste Xcode (Apple Intelligence voor omschrijvingen)
+        run: |
+          X=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)
+          if [ -n "$X" ]; then sudo xcode-select -s "$X"; fi
+          echo "::notice::$(xcodebuild -version | head -1) · $(swift --version 2>&1 | head -1)"
+
       - name: Ondertekeningscertificaat importeren
         id: cert
         continue-on-error: true
