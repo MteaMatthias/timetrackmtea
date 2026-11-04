@@ -16,6 +16,7 @@ final class PlannerTests: XCTestCase {
         db.run("DELETE FROM pushed")
         db.run("DELETE FROM calls")
         db.run("DELETE FROM call_memory")
+        db.run("DELETE FROM assignments")
         Store.replaceCompanies([janssen, peeters])
     }
 
@@ -382,5 +383,42 @@ final class PlannerTests: XCTestCase {
         XCTAssertTrue(Store.companyHasPhone("493295063"))
         XCTAssertFalse(Store.companyHasPhone("93295063"))   // geen gedeeltelijke treffer
         XCTAssertEqual(Matcher(excluded: []).match(phone: "0493 29 50 63")?.0.companyId, "c-janssen")
+    }
+
+    // MARK: Blokken zelf toewijzen, venstertitels
+
+    func testAssignedBlockMovesToOtherClientsBundle() {
+        activity(t(9), t(9, 30), host: "janssen.be")
+        activity(t(10), t(10, 30), host: "janssen.be")
+        Store.assign(start: t(10), end: t(10, 30), to: Match(companyId: "c-peeters", companyName: "Bakkerij Peeters BV"))
+        let p = plan(bundle: true)
+        let janssen = p.proposals.first { $0.match.companyId == "c-janssen" }
+        let peeters = p.proposals.first { $0.match.companyId == "c-peeters" }
+        XCTAssertEqual(janssen?.seconds ?? 0, 30 * 60, accuracy: 1)
+        XCTAssertEqual(peeters?.seconds ?? 0, 30 * 60, accuracy: 1)
+        XCTAssertTrue(peeters?.reasons.first?.contains("door jou toegewezen") ?? false)
+    }
+
+    func testShortAssignedBlockIsNotSmoothedAway() {
+        activity(t(9), t(10), host: "janssen.be")
+        Store.assign(start: t(9, 20), end: t(9, 24), to: Match(companyId: "c-peeters", companyName: "Bakkerij Peeters BV"))
+        let p = plan(bundle: true)
+        XCTAssertEqual(p.proposals.first { $0.match.companyId == "c-peeters" }?.seconds ?? 0, 0, accuracy: 1,
+                       "korter dan 5 min telt (nog) niet als voorstel")
+        // Maar de minuten mogen ook niet terug naar Janssen gaan.
+        XCTAssertEqual(p.proposals.first { $0.match.companyId == "c-janssen" }?.seconds ?? 0, 56 * 60, accuracy: 1)
+    }
+
+    func testBrowserProfileNameIsNotAClient() {
+        Store.replaceCompanies([janssen, Company(id: "c-matthias", name: "Matthias", domains: [])])
+        XCTAssertEqual(Matcher.cleanTitle("TPC Cloud - Google Chrome - Matthias"), "TPC Cloud")
+        let (match, _) = Matcher(excluded: [], ownNames: []).match(app: "Google Chrome", title: "TPC Cloud - Google Chrome - Matthias", host: "")
+        XCTAssertFalse(match.isAssigned)
+    }
+
+    func testOwnNameIsNeverAClient() {
+        Store.replaceCompanies([Company(id: "c-matthias", name: "Matthias Rijnwalt", domains: [])])
+        let (match, _) = Matcher(excluded: [], ownNames: ["Matthias Rijnwalt"]).match(app: "Mail", title: "Offerte voor Matthias Rijnwalt", host: "")
+        XCTAssertFalse(match.isAssigned)
     }
 }
