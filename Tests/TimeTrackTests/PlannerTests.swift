@@ -303,7 +303,7 @@ final class PlannerTests: XCTestCase {
 
     func testChatFarFromOtherWorkStaysUnrecognisedAndLearnsTheChatTitle() {
         activity(t(9), t(9, 20), host: "janssen.be")
-        activity(t(11), t(11, 25), host: "claude.ai", title: "Nieuwsbrief november - Claude")
+        activity(t(11), t(11, 25), title: "Nieuwsbrief november - Claude", host: "claude.ai")
         let chat = plan().proposals.first { $0.start == t(11) }
         XCTAssertFalse(chat?.match.isAssigned ?? true)
         XCTAssertEqual(chat?.learnPattern, "Nieuwsbrief november")
