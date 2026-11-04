@@ -157,6 +157,7 @@ enum Planner {
         var skippedSeconds = [Double](repeating: 0, count: n)
         var assistantSeconds = [Double](repeating: 0, count: n)
         var pinned = [Bool](repeating: false, count: n)   // door de gebruiker toegewezen: niet gladstrijken
+        var isCall = [Bool](repeating: false, count: n)   // een gesprek: altijd boeken, hoe kort ook
         var matches: [String: Match] = [:]
         var activity: [TimelineBlock] = []
 
@@ -280,6 +281,8 @@ enum Planner {
                 info.seconds = max(info.seconds, 60)
                 info.reasons[reason, default: 0] += 60
                 info.activities[call.kind == .phone ? "Telefoon: \(call.label)" : "Meeting: \(call.label)", default: 0] += 60
+                isCall[i] = true
+                if m.isAssigned { pinned[i] = true }
                 if call.kind == .meeting { info.descriptions[call.label, default: 0] += 60 }
                 minutes[i][m.key] = info
             }
@@ -485,7 +488,7 @@ enum Planner {
                     groupIndex[r.key] = groups.count
                     groups.append([r])
                 }
-            } else if r.length >= minProposalMinutes {
+            } else if r.length >= minProposalMinutes || (r.from..<r.to).contains(where: { isCall[$0] }) {
                 groups.append([r])
             }
             }
@@ -507,7 +510,8 @@ enum Planner {
             let match = matches[key] ?? .unassigned
             let parts = group.map { Proposal.Part(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60) }
             let worked = parts.reduce(0) { $0 + $1.end - $1.start }
-            guard worked >= Double(minProposalMinutes * 60) else { continue }
+            let hasCall = group.contains { r in (r.from..<r.to).contains { isCall[$0] } }
+            guard worked >= Double(minProposalMinutes * 60) || hasCall else { continue }
             var seconds = worked
             if roundTo > 1 {
                 // Enkel de duur afronden. De blokken blijven de echte minuten: wat geregistreerd wordt, dekt
