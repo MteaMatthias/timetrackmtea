@@ -210,6 +210,19 @@ final class Tracker: ObservableObject {
         return false
     }
 
+    /// True wanneer dit programma (bv. "zoom.us", "Microsoft Teams") nu het scherm wakker houdt: een gesprek loopt.
+    static func appKeepsDisplayAwake(named name: String) -> Bool {
+        var byProcess: Unmanaged<CFDictionary>?
+        guard IOPMCopyAssertionsByProcess(&byProcess) == kIOReturnSuccess,
+              let dict = byProcess?.takeRetainedValue() as? [NSNumber: [[String: Any]]] else { return false }
+        return dict.contains { pid, assertions in
+            assertions.contains {
+                ($0["AssertType"] as? String) == "PreventUserIdleDisplaySleep"
+                    || ($0["AssertionTrueType"] as? String) == "PreventUserIdleDisplaySleep"
+            } && (processPath(pid.int32Value)?.contains("/\(name)") ?? false)
+        }
+    }
+
     private static func processPath(_ pid: Int32) -> String? {
         var buffer = [CChar](repeating: 0, count: 4096)
         guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }

@@ -160,6 +160,8 @@ struct SettingsView: View {
     @AppStorage("roundTo") private var roundTo = 5
     @AppStorage("calendarDisabled") private var calendarDisabled = false
     @AppStorage("bundlePerClient") private var bundlePerClient = true
+    @AppStorage("callPromptsDisabled") private var callPromptsDisabled = false
+    @State private var flowTest: String?
     @State private var portalURL = ""
     @State private var useCustomClient = false
     @State private var clientId = ""
@@ -202,6 +204,17 @@ struct SettingsView: View {
                     }
                 }
                 Toggle("Registratie gepauzeerd", isOn: $tracker.paused)
+            }
+
+            Section("Oproepen en meetings") {
+                Toggle("Bij een oproep (Flow) of meeting vragen voor welke klant", isOn: Binding(
+                    get: { !callPromptsDisabled }, set: { callPromptsDisabled = !$0 }))
+                Text("Teams, Zoom, Google Meet, Loom, FaceTime en Webex worden herkend; bij Flow ook het nummer. Het gesprek komt in je dagvoorstel. Je antwoord wordt onthouden voor dat nummer of die meeting.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Test de herkenning in Flow") { flowTest = Self.flowDiagnosis() }
+                if let flowTest {
+                    Text(flowTest).font(.caption.monospaced()).textSelection(.enabled)
+                }
             }
 
             if !excluded.isEmpty {
@@ -279,6 +292,19 @@ struct SettingsView: View {
             if useCustomClient && !clientSecret.isEmpty { teamleader.clientSecret = clientSecret }
         }
         .onChange(of: appModel.revision) { _ in loadExcluded() }
+    }
+
+    /// Wat TimeTrack nu in Flow leest (om problemen op te sporen).
+    private static func flowDiagnosis() -> String {
+        guard let app = FlowReader.app() else { return "Flow is niet geopend." }
+        let texts = FlowReader.texts(of: app)
+        let result: String
+        if let call = FlowReader.parse(texts) {
+            result = "Gesprek gevonden: \(call.label) · \(call.detail) · \(call.ringing ? "rinkelt" : "loopt")"
+        } else {
+            result = "Geen gesprek gevonden (normaal als er nu niemand belt)."
+        }
+        return result + "\n\(texts.count) teksten gelezen, bv.: " + texts.prefix(40).joined(separator: " | ")
     }
 
     private func loadExcluded() {

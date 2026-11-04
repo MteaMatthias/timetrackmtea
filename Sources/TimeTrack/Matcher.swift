@@ -46,6 +46,7 @@ final class Matcher {
     private let rules: [(rule: Rule, terms: [String])]
     private let byDomain: [String: Company]
     private let byName: [(name: String, company: Company)]
+    private let byPhone: [String: Company]
     private var cache: [String: (Match, String)] = [:]
 
     /// Domeinen van mailproviders, online tools en sociale media zeggen niets over de klant
@@ -133,6 +134,9 @@ final class Matcher {
         }
         // Een domein van meerdere bedrijven (gedeelde hosting, mailprovider) is niet eenduidig.
         byDomain = owners.compactMapValues { $0.count == 1 ? $0[0] : nil }
+        var phoneOwners: [String: [Company]] = [:]
+        for c in candidates { for p in c.phones { phoneOwners[p, default: []].append(c) } }
+        byPhone = phoneOwners.compactMapValues { $0.count == 1 ? $0[0] : nil }
         byName = names.sorted { $0.name.count > $1.name.count }
     }
 
@@ -185,6 +189,19 @@ final class Matcher {
             return (Match(company: hit.company, invoiceable: defaultInvoiceable), "\(hit.company.name) in \(where_)")
         }
         return (.unassigned, host.isEmpty ? app : host)
+    }
+
+    /// Klant bij een telefoonnummer (nummer van een bedrijf in Teamleader), of bij de bedrijfsnaam die de
+    /// telefoonapp toont.
+    func match(phone: String, companyHint: String = "") -> (Match, String)? {
+        if let key = Phone.key(phone), let c = byPhone[key] {
+            return (Match(company: c, invoiceable: defaultInvoiceable), "nummer van \(c.name)")
+        }
+        let hint = " " + Self.normalize(companyHint) + " "
+        if hint.count > 2, let hit = byName.first(where: { hint.contains(" \($0.name) ") }) {
+            return (Match(company: hit.company, invoiceable: defaultInvoiceable), "\(hit.company.name) volgens de telefoon")
+        }
+        return nil
     }
 
     /// Match voor een afspraak: regels op de titel, dan e-maildomeinen van deelnemers, dan de naam in de titel.

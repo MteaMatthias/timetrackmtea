@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         Tracker.shared.start()
         Reminder.shared.start()
+        Task { @MainActor in CallWatcher.shared.start() }
         Task { @MainActor in
             Updater.shared.startPeriodicChecks()
             if !UserDefaults.standard.bool(forKey: "onboarded") { self.showMainWindow() }

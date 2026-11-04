@@ -102,6 +102,30 @@ final class Database {
             );
             CREATE INDEX IF NOT EXISTS pushed_tl_id ON pushed(tl_id);
             """,
+            // 3: oproepen en meetings, met de klant die de gebruiker bevestigde; telefoonnummers van bedrijven
+            """
+            ALTER TABLE companies ADD COLUMN phones TEXT NOT NULL DEFAULT '';
+            CREATE TABLE IF NOT EXISTS calls (
+                id INTEGER PRIMARY KEY,
+                start REAL NOT NULL,
+                end REAL NOT NULL,
+                kind TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '',
+                memory_key TEXT NOT NULL DEFAULT '',
+                company_id TEXT,
+                company_name TEXT NOT NULL DEFAULT '',
+                skip INTEGER NOT NULL DEFAULT 0,
+                confirmed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS calls_end ON calls(end);
+            CREATE TABLE IF NOT EXISTS call_memory (
+                key TEXT PRIMARY KEY,
+                company_id TEXT,
+                company_name TEXT NOT NULL DEFAULT '',
+                skip INTEGER NOT NULL DEFAULT 0
+            );
+            """,
         ]
         let current = Int(query("PRAGMA user_version").first?.int("user_version") ?? 0)
         for (i, sql) in migrations.enumerated() where i >= current {

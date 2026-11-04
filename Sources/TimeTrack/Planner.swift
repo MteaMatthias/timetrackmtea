@@ -129,9 +129,10 @@ enum Planner {
     ///   - events: afspraken (nil = uit de agenda's op deze Mac); voor tests in te vullen.
     ///   - dismissed: genegeerde periodes (nil = uit de database).
     ///   - bundle: per klant één voorstel voor de hele dag (in plaats van één per blok).
+    ///   - calls: oproepen en meetings (nil = uit de database).
     static func plan(day: Date, registered: [Registered], matcher: Matcher = Matcher(), roundTo: Int = 5,
                      events: [CalendarEvent]? = nil, dismissed: [(Double, Double)]? = nil,
-                     bundle: Bool = false) -> DayPlan {
+                     bundle: Bool = false, calls: [CallRecord]? = nil) -> DayPlan {
         let (lo, hi) = Store.dayBounds(day)
         let n = max(1, Int(((hi - lo) / 60).rounded()))
         var minutes = [[String: Info]](repeating: [:], count: n)
@@ -224,6 +225,32 @@ enum Planner {
                 info.activities["Afspraak: \(event.title)", default: 0] += 60
                 info.descriptions[event.title, default: 0] += 60
                 info.learn[event.title, default: 0] += 60
+                minutes[i][m.key] = info
+            }
+        }
+
+        // 2b. Oproepen (Flow) en meetings: werk voor de klant die je koos of die herkend werd. Ze gaan voor de
+        //     agenda; een gesprek zonder klant overschrijft geen herkend werk; "geen klant" telt niet.
+        for call in calls ?? Store.calls(from: lo, to: hi) where !call.skip {
+            let m = call.match
+            matches[m.key] = m
+            let reason = call.kind == .phone
+                ? "telefoon met \(call.detail.isEmpty ? call.label : call.detail)"
+                : "meeting: \(call.label)"
+            let first = index(call.start)
+            let last = min(n, Int(((call.end - lo) / 60).rounded(.up)))
+            guard first < last else { continue }
+            for i in first..<last {
+                if !m.isAssigned {
+                    let assignedActivity = minutes[i].filter { !$0.key.isEmpty }.values.reduce(0) { $0 + $1.seconds }
+                    if assignedActivity >= 30 { continue }
+                }
+                forced[i] = m.key
+                var info = minutes[i][m.key] ?? Info()
+                info.seconds = max(info.seconds, 60)
+                info.reasons[reason, default: 0] += 60
+                info.activities[call.kind == .phone ? "Telefoon: \(call.label)" : "Meeting: \(call.label)", default: 0] += 60
+                if call.kind == .meeting { info.descriptions[call.label, default: 0] += 60 }
                 minutes[i][m.key] = info
             }
         }

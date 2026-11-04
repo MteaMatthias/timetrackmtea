@@ -27,6 +27,47 @@ struct Company: Identifiable, Hashable {
     let id: String
     let name: String
     let domains: [String]
+    var phones: [String] = []     // genormaliseerd, zie Phone.key
+}
+
+/// Een oproep (Flow) of meeting (Teams, Zoom, Meet, Loom) en de klant ervan.
+struct CallRecord: Identifiable, Hashable {
+    var id: Int64 = 0
+    var start: Double
+    var end: Double
+    var kind: Kind
+    var label: String             // bv. "0493 29 50 63" of de titel van de meeting
+    var detail = ""               // bv. "Matthias · M&M"
+    var memoryKey = ""            // "tel:493295063" of "meet:weekoverleg janssen"
+    var companyId: String?
+    var companyName = ""
+    var skip = false
+    var confirmed = false
+
+    enum Kind: String { case phone, meeting }
+
+    var match: Match {
+        skip ? Match(skip: true) : Match(companyId: companyId, companyName: companyName)
+    }
+}
+
+/// Telefoonnummers vergelijken ongeacht de schrijfwijze: de laatste 9 cijfers (zonder landcode of 0).
+enum Phone {
+    static func digits(_ s: String) -> String { s.filter(\.isNumber) }
+
+    static func key(_ s: String) -> String? {
+        let d = digits(s)
+        guard d.count >= 8 else { return nil }
+        return String(d.suffix(9))
+    }
+
+    /// Ziet eruit als een telefoonnummer (bv. "0493 29 50 63", "+32 56 11 09 59").
+    static func looksLikeNumber(_ s: String) -> Bool {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        guard let first = t.first, first == "+" || first.isNumber else { return false }
+        let allowed = CharacterSet(charactersIn: "+0123456789 ./-()")
+        return t.unicodeScalars.allSatisfy { allowed.contains($0) } && (8...16).contains(digits(t).count)
+    }
 }
 
 struct Segment: Identifiable {
@@ -102,9 +143,10 @@ enum Store {
     // MARK: Bedrijven (cache van Teamleader)
 
     static func companies() -> [Company] {
-        Database.shared.query("SELECT id, name, domains FROM companies").map { r in
+        Database.shared.query("SELECT id, name, domains, phones FROM companies").map { r in
             Company(id: r.string("id"), name: r.string("name"),
-                    domains: r.string("domains").split(separator: " ").map(String.init))
+                    domains: r.string("domains").split(separator: " ").map(String.init),
+                    phones: r.string("phones").split(separator: " ").map(String.init))
         }
     }
 
@@ -113,8 +155,8 @@ enum Store {
         Database.shared.transaction {
             Database.shared.run("DELETE FROM companies")
             for c in companies {
-                Database.shared.run("INSERT OR REPLACE INTO companies(id, name, domains) VALUES (?,?,?)",
-                                    c.id, c.name, c.domains.joined(separator: " "))
+                Database.shared.run("INSERT OR REPLACE INTO companies(id, name, domains, phones) VALUES (?,?,?,?)",
+                                    c.id, c.name, c.domains.joined(separator: " "), c.phones.joined(separator: " "))
             }
         }
     }
@@ -134,6 +176,55 @@ enum Store {
             return Segment(id: i, start: a, end: b, app: r.string("app"), title: r.string("title"),
                            host: r.string("host"))
         }
+    }
+
+    // MARK: Oproepen en meetings
+
+    static func calls(from lo: Double, to hi: Double) -> [CallRecord] {
+        Database.shared.query("SELECT * FROM calls WHERE end > ? AND start < ? ORDER BY start", lo, hi).map(callRecord)
+    }
+
+    private static func callRecord(_ r: Row) -> CallRecord {
+        CallRecord(id: r["id"] as? Int64 ?? 0, start: r.double("start"), end: r.double("end"),
+                   kind: CallRecord.Kind(rawValue: r.string("kind")) ?? .meeting, label: r.string("label"),
+                   detail: r.string("detail"), memoryKey: r.string("memory_key"),
+                   companyId: r.optionalString("company_id"), companyName: r.string("company_name"),
+                   skip: r.int("skip") == 1, confirmed: r.int("confirmed") == 1)
+    }
+
+    @discardableResult
+    static func save(_ c: CallRecord) -> Int64 {
+        if c.id == 0 {
+            return Database.shared.run("""
+                INSERT INTO calls(start, end, kind, label, detail, memory_key, company_id, company_name, skip, confirmed)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                """, c.start, c.end, c.kind.rawValue, c.label, c.detail, c.memoryKey, c.companyId, c.companyName,
+                c.skip, c.confirmed)
+        }
+        Database.shared.run("""
+            UPDATE calls SET start=?, end=?, label=?, detail=?, company_id=?, company_name=?, skip=?, confirmed=?
+            WHERE id=?
+            """, c.start, c.end, c.label, c.detail, c.companyId, c.companyName, c.skip, c.confirmed, c.id)
+        return c.id
+    }
+
+    static func deleteCall(id: Int64) {
+        Database.shared.run("DELETE FROM calls WHERE id=?", id)
+    }
+
+    /// Wat de gebruiker eerder koos voor dit nummer of deze meeting.
+    static func callMemory(_ key: String) -> Match? {
+        guard !key.isEmpty, let r = Database.shared.query("SELECT * FROM call_memory WHERE key=?", key).first else {
+            return nil
+        }
+        return r.int("skip") == 1 ? Match(skip: true)
+            : Match(companyId: r.optionalString("company_id"), companyName: r.string("company_name"))
+    }
+
+    static func remember(_ key: String, _ match: Match) {
+        guard !key.isEmpty else { return }
+        Database.shared.run("INSERT OR REPLACE INTO call_memory(key, company_id, company_name, skip) VALUES (?,?,?,?)",
+                            key, match.companyId, match.companyName, match.skip)
     }
 
     // MARK: Geregistreerde blokken

@@ -14,6 +14,8 @@ final class PlannerTests: XCTestCase {
         db.run("DELETE FROM dismissed")
         db.run("DELETE FROM companies")
         db.run("DELETE FROM pushed")
+        db.run("DELETE FROM calls")
+        db.run("DELETE FROM call_memory")
         Store.replaceCompanies([janssen, peeters])
     }
 
@@ -28,9 +30,9 @@ final class PlannerTests: XCTestCase {
     }
 
     private func plan(registered: [Registered] = [], roundTo: Int = 1, events: [CalendarEvent] = [],
-                      bundle: Bool = false) -> DayPlan {
+                      bundle: Bool = false, calls: [CallRecord] = []) -> DayPlan {
         Planner.plan(day: day, registered: registered, matcher: Matcher(ownDomain: "mtea.be", excluded: []),
-                     roundTo: roundTo, events: events, bundle: bundle)
+                     roundTo: roundTo, events: events, bundle: bundle, calls: calls)
     }
 
     func testWebsiteVisitBecomesProposalWithReason() {
@@ -307,5 +309,70 @@ final class PlannerTests: XCTestCase {
         let chat = plan().proposals.first { $0.start == t(11) }
         XCTAssertFalse(chat?.match.isAssigned ?? true)
         XCTAssertEqual(chat?.learnPattern, "Nieuwsbrief november")
+    }
+
+    // MARK: Oproepen en meetings
+
+    /// Teksten zoals Flow ze toont (volgorde van het scherm): contactkaart links, gesprekspaneel rechts.
+    private let flowActive = ["Beschikbaar tot 17:30", "Overzicht", "Matthias Rijnwalt", "Beschikbaar", "Contactgegevens",
+                              "Telefoonnummer", "056 90 89 41", "Bedrijfsnaam", "M&M", "Oproepgeschiedenis",
+                              "Uitgaande oproep", "07:17", "00:22", "M.", "Matthias .", "M&M", "0493 29 50 63",
+                              "Via", "Mtea - Verkoop", "Gewenst 003256446650", "Ophangen", "Parkeren", "Doorverbinden"]
+    private let flowRinging = ["Beschikbaar tot 17:30", "Telefoonnummer", "056 90 89 41", "07:17", "Inkomende oproep",
+                               "M.", "Matthias .", "M&M", "0493 29 50 63", "Via", "Mtea - Verkoop",
+                               "Gewenst 003256446650", "Verwijderen", "Antwoorden"]
+
+    func testFlowActiveCallIsRead() {
+        let call = FlowReader.parse(flowActive)
+        XCTAssertEqual(call?.number, "0493 29 50 63")
+        XCTAssertEqual(call?.key, "tel:493295063")
+        XCTAssertEqual(call?.detail, "Matthias · M&M")
+        XCTAssertEqual(call?.ringing, false)
+    }
+
+    func testFlowIncomingCallIsRead() {
+        let call = FlowReader.parse(flowRinging)
+        XCTAssertEqual(call?.number, "0493 29 50 63")
+        XCTAssertEqual(call?.ringing, true)
+    }
+
+    func testFlowWithoutCallIsNothing() {
+        XCTAssertNil(FlowReader.parse(["Beschikbaar tot 17:30", "Telefoonnummer", "056 90 89 41", "07:17"]))
+    }
+
+    func testPhoneNumbersCompareRegardlessOfNotation() {
+        XCTAssertEqual(Phone.key("0493 29 50 63"), Phone.key("+32 493 29 50 63"))
+        XCTAssertEqual(Phone.key("0032493295063"), "493295063")
+        XCTAssertTrue(Phone.looksLikeNumber("+32 56 11 09 59"))
+        XCTAssertFalse(Phone.looksLikeNumber("00:22"))
+        XCTAssertFalse(Phone.looksLikeNumber("Gewenst 003256446650"))
+    }
+
+    func testCompanyPhoneNumberIsRecognised() {
+        Store.replaceCompanies([Company(id: "c-janssen", name: "Janssen NV", domains: ["janssen.be"], phones: ["493295063"])])
+        let hit = Matcher(excluded: []).match(phone: "+32 493 29 50 63")
+        XCTAssertEqual(hit?.0.companyId, "c-janssen")
+    }
+
+    func testCallCountsAsWorkForTheChosenClient() {
+        activity(t(10), t(10, 30), app: "Flow", title: "Flow")
+        let call = CallRecord(start: t(10), end: t(10, 25), kind: .phone, label: "0493 29 50 63", detail: "Matthias · M&M",
+                              companyId: "c-peeters", companyName: "Bakkerij Peeters BV", confirmed: true)
+        let p = plan(calls: [call])
+        let peeters = p.proposals.first { $0.match.companyId == "c-peeters" }
+        XCTAssertEqual(peeters?.duration ?? 0, 25 * 60, accuracy: 61)
+        XCTAssertTrue(peeters?.reasons.first?.contains("telefoon met Matthias · M&M") ?? false, "\(peeters?.reasons ?? [])")
+    }
+
+    func testCallMarkedNoClientIsNotProposed() {
+        let call = CallRecord(start: t(10), end: t(10, 25), kind: .phone, label: "0493", skip: true)
+        XCTAssertTrue(plan(calls: [call]).proposals.isEmpty)
+    }
+
+    func testCallMemoryRemembersTheAnswer() {
+        Store.remember("tel:493295063", Match(companyId: "c-janssen", companyName: "Janssen NV"))
+        XCTAssertEqual(Store.callMemory("tel:493295063")?.companyId, "c-janssen")
+        Store.remember("tel:111111111", Match(skip: true))
+        XCTAssertEqual(Store.callMemory("tel:111111111")?.skip, true)
     }
 }

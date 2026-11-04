@@ -269,7 +269,9 @@ final class Teamleader: ObservableObject {
                         domains.insert(String(d).lowercased())
                     }
                 }
-                companies.append(Company(id: id, name: name, domains: domains.sorted()))
+                let phones = (c["telephones"] as? [[String: Any]] ?? [])
+                    .compactMap { ($0["number"] as? String).flatMap(Phone.key) }
+                companies.append(Company(id: id, name: name, domains: domains.sorted(), phones: Array(Set(phones))))
             }
             if data.count < 100 { break }
         }
@@ -289,6 +291,31 @@ final class Teamleader: ObservableObject {
         }
         return try await list("companies.list", ["filter": ["term": term, "status": "active"],
                                                  "page": ["size": 25, "number": 1]])
+    }
+
+    /// Zoekt een contact met dit telefoonnummer en geeft zijn (eerste) bedrijf terug.
+    /// Teamleader zoekt op tekst, dus enkele schrijfwijzen worden geprobeerd.
+    func companyForPhone(_ number: String) async -> Match? {
+        guard isConnected, let key = Phone.key(number) else { return nil }
+        let digits = Phone.digits(number)
+        var variants: [String] = []
+        for v in [number, digits, "0" + key, "+32" + key, key] where !variants.contains(v) { variants.append(v) }
+        for term in variants {
+            guard let result = try? await call("contacts.list", ["filter": ["term": term], "page": ["size": 5, "number": 1]]),
+                  let contacts = result["data"] as? [[String: Any]] else { continue }
+            for contact in contacts {
+                let numbers = (contact["telephones"] as? [[String: Any]] ?? []).compactMap { $0["number"] as? String }
+                guard numbers.contains(where: { Phone.key($0) == key }), let id = contact["id"] as? String else { continue }
+                guard let info = try? await call("contacts.info", ["id": id]),
+                      let data = info["data"] as? [String: Any],
+                      let links = data["companies"] as? [[String: Any]],
+                      let company = links.first?["company"] as? [String: Any],
+                      let companyId = company["id"] as? String else { continue }
+                let name = Store.companyName(id: companyId) ?? "Klant"
+                return Match(companyId: companyId, companyName: name, invoiceable: defaultInvoiceable)
+            }
+        }
+        return nil
     }
 
     /// Tijdsregistraties van de aangemelde gebruiker die starten in [from, to).
