@@ -276,11 +276,13 @@ enum Planner {
             let description: String
         }
         var callItems: [CallItem] = []
+        let assigned = assignments ?? Store.assignments(from: lo, to: hi)
         for (number, call) in (calls ?? Store.calls(from: lo, to: hi)).enumerated() where !call.skip {
             let start = max(call.start, lo), end = min(call.end, hi)
             // Een gesprek van een paar seconden (bv. één verkeerd gelezen moment) is geen werk.
             guard end - start >= 10 else { continue }
-            let m = call.match
+            // Heb je het gesprek zelf aan een (andere) klant toegewezen, dan geldt die keuze.
+            let m = assigned.last { a in min(a.end, end) - max(a.start, start) >= (end - start) / 2 }?.match ?? call.match
             let callKey = "call:\(call.id == 0 ? Int64(number) : call.id):" + m.key
             matches[callKey] = m
             let reason = call.kind == .phone
@@ -308,13 +310,14 @@ enum Planner {
         }
 
         // 2c. Zelf toegewezen blokken gaan voor alles: al het werk in die minuten hoort bij die klant.
-        for a in assignments ?? Store.assignments(from: lo, to: hi) {
+        for a in assigned {
             let m = a.match
             matches[m.key] = m
             let first = index(a.start)
             let last = min(n, Int(((a.end - lo) / 60).rounded(.up)))
             guard first < last else { continue }
-            for i in first..<last {
+            // Minuten van een gesprek blijven bij dat gesprek (dat volgt de toewijzing hierboven zelf).
+            for i in first..<last where !isCall[i] {
                 var merged = Info()
                 for (_, info) in minutes[i] {
                     merged.seconds += info.seconds
