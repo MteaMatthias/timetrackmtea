@@ -5,7 +5,8 @@ import SwiftUI
 /// Wat de telefoonapp of een meeting op dit moment toont.
 struct DetectedCall: Equatable {
     var kind: CallRecord.Kind
-    var key: String              // vaste sleutel: "tel:493295063" of "meet:weekoverleg janssen"
+    var key: String              // identiteit van dit gesprek: "tel:493295063", "meet:weekoverleg janssen"
+    var memoryKey: String        // waaronder het antwoord onthouden wordt ("" = niet onthouden)
     var label: String
     var detail = ""
     var ringing = false
@@ -15,8 +16,9 @@ struct DetectedCall: Equatable {
 }
 
 /// Volgt oproepen in Flow (Telavox) en meetings (Teams, Zoom, Google Meet, Loom, FaceTime, Webex).
-/// Bij een nieuw gesprek verschijnt rechtsboven een vraag: "Is dit klant X?". Het gesprek komt met de
-/// gekozen klant in het dagvoorstel; het antwoord wordt onthouden voor dat nummer of die meeting.
+/// Zodra een gesprek loopt (niet tijdens het rinkelen) verschijnt rechtsboven "Is dit klant X?". Voor een
+/// nummer dat je al eens bevestigde, wordt niets meer gevraagd. Het gesprek komt met de klant in het dagvoorstel.
+/// Het uitlezen gebeurt op de achtergrond, zodat TimeTrack nooit hapert.
 @MainActor
 final class CallWatcher: ObservableObject {
     static let shared = CallWatcher()
@@ -30,79 +32,99 @@ final class CallWatcher: ObservableObject {
     /// Het nummer toevoegen aan de fiche van de gekozen klant (vinkje in de vraag).
     @Published var addNumberToCompany = true
 
-    private var timer: Timer?
     private var activeKey: String?
     private var lastSeen: Double = 0
     private var wasActive = false
     private var answered = false
+    private var prompted = false
+    private var pendingDetection: DetectedCall?
     private var hideTask: Task<Void, Never>?
+    private var loop: Task<Void, Never>?
 
     var isEnabled: Bool { !UserDefaults.standard.bool(forKey: "callPromptsDisabled") }
 
     func start() {
-        guard timer == nil else { return }
-        let t = Timer(timeInterval: 3, repeats: true) { _ in
-            Task { @MainActor in await CallWatcher.shared.tick() }
+        guard loop == nil else { return }
+        loop = Task { @MainActor in
+            while !Task.isCancelled {
+                await self.tick()
+                // Tijdens een gesprek vaker kijken; anders rustig aan (spaart batterij en Flow).
+                let seconds: UInt64 = self.activeKey != nil ? 2 : 5
+                try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            }
         }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
     }
 
     func tick() async {
         guard isEnabled, !Tracker.shared.paused, Tracker.shared.hasAccessibility else { return }
+        let detected = await Task.detached(priority: .utility) {
+            FlowReader.currentCall() ?? MeetingDetector.current()
+        }.value
         let now = Date().timeIntervalSince1970
-        if let detected = FlowReader.currentCall() ?? MeetingDetector.current() {
+        if let detected {
             if detected.key != activeKey {
                 finish()
-                await begin(detected, now)
+                begin(detected, now)
             } else {
-                update(detected, now)
+                await update(detected, now)
             }
-        } else if activeKey != nil, now - lastSeen > (current?.kind == .phone ? 7 : 45) {
+        } else if activeKey != nil, now - lastSeen > (current?.kind == .phone ? 8 : 300) {
+            // Een meeting in een ander venster loopt gewoon door; pas na 5 minuten zonder spoor is ze voorbij.
             finish()
         }
     }
 
     // MARK: Verloop van een gesprek
 
-    private func begin(_ d: DetectedCall, _ now: Double) async {
+    private func begin(_ d: DetectedCall, _ now: Double) {
         activeKey = d.key
         lastSeen = now
         wasActive = !d.ringing
         answered = false
+        prompted = false
         hideTask?.cancel()
 
-        var record = CallRecord(start: now, end: now, kind: d.kind, label: d.label, detail: d.detail, memoryKey: d.key)
-        let matcher = Matcher.current()
-        var guess: (Match, String)?
-        if let remembered = Store.callMemory(d.key) {
-            if remembered.skip {
-                // Eerder als privé of "geen klant" aangeduid: niet meer vragen.
-                record.skip = true
-                record.confirmed = true
-                record.id = Store.save(record)
-                current = nil
-                CallPrompt.shared.hide()
-                return
-            }
-            guess = (remembered, "eerder door jou gekozen")
-        } else if d.kind == .phone {
-            guess = matcher.match(phone: d.number, companyHint: d.companyHint)
-        } else if let title = d.eventTitle {
-            guess = matcher.match(event: CalendarEvent(start: now, end: now, title: title, attendeeEmails: MeetingDetector.attendees(now)))
+        var record = CallRecord(start: now, end: now, kind: d.kind, label: d.label, detail: d.detail,
+                                memoryKey: d.memoryKey)
+        let remembered = Store.callMemory(d.memoryKey)
+        if let remembered {
+            // Al eens beantwoord: niets meer vragen.
+            record.companyId = remembered.companyId
+            record.companyName = remembered.companyName
+            record.skip = remembered.skip
+            record.confirmed = true
+            answered = true
+            suggestion = remembered.skip ? nil : remembered
+            suggestionReason = "eerder door jou gekozen"
         } else {
-            let hit = matcher.match(app: "", title: d.label, host: "")
-            if hit.0.isAssigned { guess = hit }
+            let matcher = Matcher.current()
+            var guess: (Match, String)?
+            if d.kind == .phone {
+                guess = matcher.match(phone: d.number, companyHint: d.companyHint)
+            } else if let title = d.eventTitle {
+                guess = matcher.match(event: CalendarEvent(start: now, end: now, title: title,
+                                                           attendeeEmails: MeetingDetector.attendees(now)))
+            } else {
+                let hit = matcher.match(app: "", title: d.label, host: "")
+                if hit.0.isAssigned { guess = hit }
+            }
+            apply(guess, to: &record)
         }
-        apply(guess, to: &record)
         numberUnknownInTeamleader = d.kind == .phone && !(Phone.key(d.number).map(Store.companyHasPhone) ?? true)
         addNumberToCompany = !UserDefaults.standard.bool(forKey: "addPhoneDisabled")
         record.id = Store.save(record)
         current = record
-        CallPrompt.shared.show()
+        pendingDetection = d
+        if wasActive { Task { await self.promptIfNeeded() } }
+    }
 
-        // Nummer niet herkend: een contact met dit nummer zoeken in Teamleader.
-        if guess == nil, d.kind == .phone, let found = await Teamleader.shared.companyForPhone(d.number),
+    /// Vraag tonen zodra het gesprek loopt (en enkel als het antwoord nog niet gekend is).
+    private func promptIfNeeded() async {
+        guard !prompted, !answered, let d = pendingDetection, let record = current else { return }
+        prompted = true
+        CallPrompt.shared.show()
+        // Nummer niet herkend: pas nu (opgenomen) een contact met dit nummer zoeken in Teamleader.
+        if suggestion == nil, d.kind == .phone, let found = await Teamleader.shared.companyForPhone(d.number),
            current?.id == record.id, !answered {
             var updated = record
             numberUnknownInTeamleader = false
@@ -119,9 +141,9 @@ final class CallWatcher: ObservableObject {
         record.companyName = guess?.0.companyName ?? ""
     }
 
-    private func update(_ d: DetectedCall, _ now: Double) {
+    private func update(_ d: DetectedCall, _ now: Double) async {
         lastSeen = now
-        guard var record = current, record.memoryKey == d.key else { return }
+        guard var record = current, activeKey == d.key else { return }
         if !d.ringing && !wasActive {
             // Opgenomen: het gesprek begint nu, niet toen het begon te rinkelen.
             wasActive = true
@@ -130,11 +152,13 @@ final class CallWatcher: ObservableObject {
         record.end = now
         Store.save(record)
         current = record
+        if wasActive { await promptIfNeeded() }
     }
 
     private func finish() {
         guard activeKey != nil else { return }
         activeKey = nil
+        pendingDetection = nil
         guard let record = current else { return }
         if !wasActive {
             // Gemiste of geweigerde oproep: geen werk.
@@ -144,8 +168,9 @@ final class CallWatcher: ObservableObject {
             return
         }
         AppModel.shared.changed()
-        if answered {
+        if answered || !prompted {
             CallPrompt.shared.hide()
+            current = nil
         } else {
             // Nog even laten staan, zodat je na het gesprek kan antwoorden.
             hideTask = Task { @MainActor in
@@ -185,6 +210,7 @@ final class CallWatcher: ObservableObject {
 
     private func save(_ record: CallRecord, remember match: Match) {
         Store.save(record)
+        // Enkel onthouden voor een nummer of een meeting met een eigen titel (niet voor "Teams-gesprek").
         Store.remember(record.memoryKey, match)
         if record.kind == .phone, numberUnknownInTeamleader, addNumberToCompany, !match.skip,
            let companyId = match.companyId {
@@ -217,12 +243,14 @@ final class CallWatcher: ObservableObject {
 // MARK: - Flow (Telavox)
 
 /// Leest het gesprekspaneel van de Flow-app via de Accessibility-API:
-/// "Inkomende oproep" of een teller (00:22) met "Ophangen", daaronder naam, bedrijf en nummer.
+/// "Inkomende oproep" met de knoppen Verwijderen/Antwoorden (rinkelt), of een teller (00:22) met
+/// Ophangen (loopt); daartussen naam, bedrijf en nummer.
 enum FlowReader {
     static let ringingWords: Set<String> = ["Inkomende oproep", "Incoming call", "Inkommande samtal", "Appel entrant"]
-    static let activeWords: Set<String> = ["Ophangen", "Hang up", "Lägg på", "Raccrocher"]
-    static let panelEndWords: Set<String> = ["Ophangen", "Verwijderen", "Antwoorden", "Hang up", "Decline", "Answer",
-                                             "Weigeren", "Raccrocher", "Répondre"]
+    static let answerButtons: Set<String> = ["Antwoorden", "Answer", "Svara", "Répondre"]
+    static let hangUpButtons: Set<String> = ["Ophangen", "Hang up", "Lägg på", "Raccrocher"]
+    private static var enabledPids = Set<pid_t>()
+    private static let lock = NSLock()
 
     static func app() -> NSRunningApplication? {
         NSWorkspace.shared.runningApplications.first {
@@ -235,18 +263,25 @@ enum FlowReader {
         return parse(texts(of: app))
     }
 
-    /// Alle zichtbare teksten van de vensters van een app, in volgorde (begrensd).
-    static func texts(of app: NSRunningApplication, limit: Int = 2500) -> [String] {
+    /// Alle zichtbare teksten van de vensters van een app, in volgorde; begrensd in aantal en tijd.
+    static func texts(of app: NSRunningApplication, limit: Int = 3000, budget: TimeInterval = 0.4) -> [String] {
         let element = AXUIElementCreateApplication(app.processIdentifier)
-        // Electron/Chromium-apps stellen hun inhoud pas beschikbaar als een hulpprogramma erom vraagt.
-        AXUIElementSetAttributeValue(element, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        lock.lock()
+        let first = enabledPids.insert(app.processIdentifier).inserted
+        lock.unlock()
+        if first {
+            // Electron/Chromium-apps stellen hun inhoud pas beschikbaar als een hulpprogramma erom vraagt.
+            AXUIElementSetAttributeValue(element, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        }
         var windows: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &windows) == .success,
               let list = windows as? [AXUIElement] else { return [] }
+        let deadline = Date().addingTimeInterval(budget)
         var out: [String] = []
         var visited = 0
         func walk(_ e: AXUIElement, _ depth: Int) {
-            guard visited < limit, depth < 45 else { return }
+            guard visited < limit, depth < 45, visited % 50 != 0 || Date() < deadline else { return }
             visited += 1
             for attribute in [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
                 var value: CFTypeRef?
@@ -272,29 +307,35 @@ enum FlowReader {
     private static func isInitials(_ s: String) -> Bool { s.count <= 3 && s.hasSuffix(".") }
 
     /// Haalt het gesprekspaneel uit de teksten. Nil als er geen oproep loopt of binnenkomt.
+    /// Het paneel wordt herkend aan de knoppen (Antwoorden of Ophangen), niet aan losse woorden elders.
     static func parse(_ texts: [String]) -> DetectedCall? {
-        let ringingIndex = texts.firstIndex { ringingWords.contains($0) }
-        let activeIndex = texts.firstIndex { activeWords.contains($0) }
-        guard ringingIndex != nil || activeIndex != nil else { return nil }
-        let endIndex = texts.firstIndex { panelEndWords.contains($0) } ?? texts.count
+        let answerIndex = texts.firstIndex { answerButtons.contains($0) }
+        let hangUpIndex = texts.firstIndex { hangUpButtons.contains($0) }
+        let buttonIndex: Int
+        let ringing: Bool
         let startIndex: Int
-        if let r = ringingIndex, r < endIndex {
-            startIndex = r
-        } else if let t = texts[..<endIndex].lastIndex(where: isTimer) {
+        if let h = hangUpIndex, let t = texts[..<h].lastIndex(where: isTimer) {
+            buttonIndex = h
+            ringing = false
             startIndex = t
+        } else if let a = answerIndex, let r = texts[..<a].lastIndex(where: { ringingWords.contains($0) }) {
+            buttonIndex = a
+            ringing = true
+            startIndex = r
         } else {
-            startIndex = max(0, endIndex - 10)
+            return nil
         }
-        guard startIndex < endIndex else { return nil }
-        let panel = Array(texts[startIndex..<endIndex])
+        guard startIndex < buttonIndex, buttonIndex - startIndex <= 15 else { return nil }
+        let panel = Array(texts[startIndex..<buttonIndex])
         guard let number = panel.first(where: { Phone.looksLikeNumber($0) && !isTimer($0) }) else { return nil }
         let before = panel.prefix { $0 != number }.dropFirst()
-            .filter { !isTimer($0) && !isInitials($0) && !ringingWords.contains($0) }
+            .filter { !isTimer($0) && !isInitials($0) && !ringingWords.contains($0) && !answerButtons.contains($0) }
         let name = before.first.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " .")) } ?? ""
         let company = before.dropFirst().first ?? ""
-        return DetectedCall(kind: .phone, key: "tel:" + (Phone.key(number) ?? Phone.digits(number)), label: number,
+        let key = "tel:" + (Phone.key(number) ?? Phone.digits(number))
+        return DetectedCall(kind: .phone, key: key, memoryKey: key, label: number,
                             detail: [name, company].filter { !$0.isEmpty }.joined(separator: " · "),
-                            ringing: ringingIndex != nil && activeIndex == nil, number: number, companyHint: company)
+                            ringing: ringing, number: number, companyHint: company)
     }
 }
 
@@ -310,18 +351,21 @@ enum MeetingDetector {
     static func current() -> DetectedCall? {
         let now = Date().timeIntervalSince1970
         var label: String?
-        if let front = Tracker.activeWindow(), Browser.host(bundleId: front.bundle) == "meet.google.com",
+        if let front = Tracker.activeWindow(), Browser.cachedHost(bundleId: front.bundle) == "meet.google.com",
            front.title.range(of: #"[a-z]{3}-[a-z]{4}-[a-z]{3}"#, options: .regularExpression) != nil
             || front.title.hasPrefix("Meet") && front.title.count > 12 {
             label = cleaned(front.title)
-        } else if let app = apps.first(where: { Tracker.appKeepsDisplayAwake(named: $0.name) }) {
-            label = app.label
+        } else {
+            let holders = Tracker.displayAwakeHolders()
+            label = apps.first { app in holders.contains { $0.contains("/\(app.name)") } }?.label
         }
         guard let label else { return nil }
-        // Loopt er nu een afspraak in de agenda, dan is die titel de beste omschrijving.
+        // Loopt er nu een afspraak in de agenda, dan is die titel de beste omschrijving en kan het antwoord
+        // onthouden worden. Een los "Teams-gesprek" niet: dat zegt niets over de klant.
         let event = CalendarSource.shared.events(from: now - 60, to: now + 60).first { !$0.title.isEmpty }
         let title = event?.title ?? label
-        return DetectedCall(kind: .meeting, key: "meet:" + Matcher.normalize(title), label: title,
+        let key = "meet:" + Matcher.normalize(title)
+        return DetectedCall(kind: .meeting, key: key, memoryKey: event != nil ? key : "", label: title,
                             detail: event != nil ? label : "", eventTitle: event?.title)
     }
 
@@ -330,10 +374,7 @@ enum MeetingDetector {
     }
 
     private static func cleaned(_ title: String) -> String {
-        var t = title
-        for suffix in [" - Google Chrome", " — Google Chrome", " - Safari", " - Microsoft Edge", " - Brave"] where t.hasSuffix(suffix) {
-            t = String(t.dropLast(suffix.count))
-        }
+        var t = Matcher.cleanTitle(title)
         if t.hasPrefix("Meet - ") || t.hasPrefix("Meet – ") { t = String(t.dropFirst(7)) }
         return t.isEmpty ? "Google Meet" : t
     }

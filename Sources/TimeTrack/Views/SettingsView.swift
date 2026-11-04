@@ -32,6 +32,7 @@ struct SetupChecklist: View {
     @AppStorage("browserDisabled") private var browserDisabled = false
     @AppStorage("reminderEnabled") private var reminderEnabled = true
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
+    @State private var browserPermission = Browser.Permission.unknown
     @State private var connecting = false
     @State private var error: String?
 
@@ -40,12 +41,9 @@ struct SetupChecklist: View {
             CheckRow(done: tracker.hasAccessibility, title: "1. Vensters herkennen",
                      detail: tracker.hasAccessibility
                         ? "TimeTrack ziet welk document of venster actief is."
-                        : "Zet TimeTrack aan bij Toegankelijkheid. Staat het er al maar werkt het niet (na een update)? Verwijder het met – en voeg het opnieuw toe.") {
+                        : "Zet TimeTrack aan bij Toegankelijkheid (macOS vraagt hiervoor je Mac-wachtwoord; heb je geen beheerdersrechten, vraag het dan aan wie je Mac beheert). Staat het er al maar werkt het niet? Verwijder het met – en voeg het opnieuw toe.") {
                 if !tracker.hasAccessibility {
-                    Button("Toestemming geven…") {
-                        tracker.requestAccessibility()
-                        SystemSettings.open("Privacy_Accessibility")
-                    }
+                    Button("Toestemming geven…") { tracker.requestAccessibility() }
                 }
             }
             Divider()
@@ -80,9 +78,16 @@ struct SetupChecklist: View {
                 }
             }
             Divider()
-            CheckRow(done: !browserDisabled, title: "4. Websites",
-                     detail: "Het domein van de website die je bekijkt (bv. klantx.be) helpt de klant herkennen. Bij het eerste gebruik vraagt macOS per browser om toestemming: klik op OK. Enkel het domein wordt bewaard.") {
-                Toggle("", isOn: Binding(get: { !browserDisabled }, set: { browserDisabled = !$0 })).labelsHidden()
+            CheckRow(done: !browserDisabled && browserPermission != .denied, title: "4. Websites",
+                     detail: browserPermission == .denied
+                        ? "Je browser gaf TimeTrack geen toestemming, dus websites worden niet herkend. Zet TimeTrack aan onder Systeeminstellingen → Privacy en beveiliging → Automatisering."
+                        : "Het domein van de website die je bekijkt (bv. klantx.be) helpt de klant herkennen. Bij het eerste gebruik vraagt macOS per browser om toestemming: klik op OK. Enkel het domein wordt bewaard.") {
+                HStack {
+                    if browserPermission == .denied {
+                        Button("Toestemming geven…") { SystemSettings.open("Privacy_Automation") }
+                    }
+                    Toggle("", isOn: Binding(get: { !browserDisabled }, set: { browserDisabled = !$0 })).labelsHidden()
+                }
             }
             Divider()
             CheckRow(done: launchAtLogin, title: "5. Automatisch starten",
@@ -100,6 +105,10 @@ struct SetupChecklist: View {
                         if on { Task { await Reminder.shared.requestPermission() } }
                     }
             }
+        }
+        .onAppear { browserPermission = Browser.automationPermission() }
+        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
+            browserPermission = Browser.automationPermission()
         }
     }
 
@@ -167,6 +176,7 @@ struct SettingsView: View {
     @AppStorage("bundlePerClient") private var bundlePerClient = true
     @AppStorage("callPromptsDisabled") private var callPromptsDisabled = false
     @State private var flowTest: String?
+    @State private var confirmWipe = false
     @State private var portalURL = ""
     @State private var useCustomClient = false
     @State private var clientId = ""
@@ -208,7 +218,7 @@ struct SettingsView: View {
                         }
                     }
                 }
-                Toggle("Registratie gepauzeerd", isOn: $tracker.paused)
+                Toggle("Bijhouden gepauzeerd", isOn: $tracker.paused)
             }
 
             Section("Oproepen en meetings") {
@@ -265,6 +275,16 @@ struct SettingsView: View {
                     Text(Database.directory.path).textSelection(.enabled).font(.caption)
                 }
                 Button("Toon in Finder") { NSWorkspace.shared.open(Database.directory) }
+                Button("Wis mijn activiteit…", role: .destructive) { confirmWipe = true }
+                    .confirmationDialog("Alle bijgehouden activiteit op deze Mac wissen?", isPresented: $confirmWipe) {
+                        Button("Wis activiteit", role: .destructive) {
+                            Store.wipeActivity()
+                            appModel.changed()
+                        }
+                    } message: {
+                        Text("Je registraties in Teamleader, je correcties en je instellingen blijven bewaard.")
+                    }
+                Text("Activiteit ouder dan 90 dagen wordt automatisch gewist.").font(.caption).foregroundStyle(.secondary)
                 Label("Privé: wat je doet (programma's, websites, oproepen) en je voorstellen blijven enkel op deze Mac. Niemand anders ziet ze: geen collega's, geen beheerder, ook niet tools.mtea.be. Pas wanneer jij een voorstel registreert, komt die registratie op jouw naam in Teamleader. Daar zijn ze zichtbaar volgens de rechten in Teamleader (zoals elke tijdsregistratie die je zelf invult).", systemImage: "lock.fill")
                     .font(.caption).foregroundStyle(.secondary)
             }

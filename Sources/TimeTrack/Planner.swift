@@ -104,9 +104,13 @@ enum Planner {
 
     static let assistantApps: Set<String> = ["Claude", "ChatGPT", "Gemini", "Copilot", "Microsoft Copilot",
                                              "Perplexity", "Le Chat", "Cursor"]
+    /// AI-assistenten en uitleg-/opzoekwerk (video's, documentatie): zonder herkende klant krijgen ze de klant
+    /// van het werk ervoor of erna.
     static let assistantHosts: Set<String> = ["claude.ai", "chatgpt.com", "chat.openai.com", "gemini.google.com",
                                               "copilot.microsoft.com", "perplexity.ai", "www.perplexity.ai",
-                                              "chat.mistral.ai", "aistudio.google.com"]
+                                              "chat.mistral.ai", "aistudio.google.com", "youtube.com", "m.youtube.com",
+                                              "vimeo.com", "stackoverflow.com", "developer.mozilla.org",
+                                              "google.com", "google.be", "bing.com"]
 
     static func isAssistant(app: String, host: String) -> Bool {
         assistantApps.contains(app) || assistantHosts.contains(host)
@@ -343,28 +347,31 @@ enum Planner {
             }
             i = j
         }
-        // b. korte uitstapjes opslorpen in het omringende werk
-        for _ in 0..<3 {
-            var changed = false
+        // b. korte uitstapjes opslorpen in het omringende werk. Telkens één wijziging en dan opnieuw kijken,
+        //    zodat elke beslissing op de actuele toestand gebeurt. Bij bundelen blijven korte blokken van een
+        //    herkende klant behouden: ze tellen op bij die klant.
+        for _ in 0..<500 {
             let all = runs()
-            for (idx, r) in all.enumerated() {
+            var applied = false
+            for (idx, r) in all.enumerated() where !pinned[r.from] {
                 let prev: Run? = idx > 0 && all[idx - 1].to == r.from ? all[idx - 1] : nil
                 let next: Run? = idx + 1 < all.count && all[idx + 1].from == r.to ? all[idx + 1] : nil
+                let keepShort = bundle && !r.key.isEmpty
                 var target: String?
-                if r.length < minProposalMinutes, let p = prev, let q = next, p.key == q.key {
+                if r.length < minProposalMinutes, !keepShort, let p = prev, let q = next, p.key == q.key {
                     target = p.key
                 } else if r.key.isEmpty, r.length < absorbUnassignedMinutes {
                     target = [prev, next].compactMap { $0 }.filter { !$0.key.isEmpty }.max { $0.length < $1.length }?.key
-                } else if r.length < minProposalMinutes, !(bundle && !r.key.isEmpty) {
-                    // Bij bundelen blijven korte blokken van een herkende klant behouden: ze tellen op.
+                } else if r.length < minProposalMinutes, !keepShort {
                     target = [prev, next].compactMap { $0 }.max { $0.length < $1.length }?.key
                 }
-                if let target, target != r.key, !pinned[r.from] {
+                if let target, target != r.key {
                     for x in r.from..<r.to { keyAt[x] = target }
-                    changed = true
+                    applied = true
+                    break
                 }
             }
-            if !changed { break }
+            if !applied { break }
         }
 
         // c. Niet-herkend werk in een AI-assistent (Claude, ChatGPT…) hoort meestal bij de klant waaraan je

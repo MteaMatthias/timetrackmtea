@@ -22,6 +22,10 @@ osascript -e 'tell application id "be.mtea.timetrack" to quit' >/dev/null 2>&1 |
 pkill -x TimeTrack >/dev/null 2>&1 || true
 sleep 1
 rm -rf "$DEST/TimeTrack.app"
+# Een oudere kopie op de andere plaats verwijderen, zodat altijd dezelfde versie opent.
+for OTHER in /Applications "$HOME/Applications"; do
+  [ "$OTHER" != "$DEST" ] && [ -w "$OTHER" ] && rm -rf "$OTHER/TimeTrack.app" 2>/dev/null
+done
 mv "$TMP/TimeTrack.app" "$DEST/"
 xattr -dr com.apple.quarantine "$DEST/TimeTrack.app" 2>/dev/null || true
 

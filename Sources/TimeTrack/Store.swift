@@ -87,6 +87,13 @@ struct Segment: Identifiable {
 enum Store {
     static let idleApp = "__idle__"
 
+    /// Gaat omhoog bij elke wijziging aan regels, bedrijven of uitsluitingen (voor de Matcher-cache).
+    private(set) static var dataVersion = 0
+    private static let versionLock = NSLock()
+    static func bumpDataVersion() {
+        versionLock.lock(); dataVersion += 1; versionLock.unlock()
+    }
+
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.calendar = Calendar(identifier: .gregorian)
@@ -121,6 +128,7 @@ enum Store {
     }
 
     static func save(_ r: Rule) {
+        defer { bumpDataVersion() }
         if r.id == 0 {
             Database.shared.run("""
                 INSERT INTO rules(field, pattern, skip, company_id, company_name, work_type_id, work_type_name,
@@ -138,6 +146,7 @@ enum Store {
 
     static func delete(rule: Rule) {
         Database.shared.run("DELETE FROM rules WHERE id=?", rule.id)
+        bumpDataVersion()
     }
 
     // MARK: Bedrijven (cache van Teamleader)
@@ -152,6 +161,7 @@ enum Store {
 
     static func replaceCompanies(_ companies: [Company]) {
         guard !companies.isEmpty else { return }
+        defer { bumpDataVersion() }
         Database.shared.transaction {
             Database.shared.run("DELETE FROM companies")
             for c in companies {
@@ -185,6 +195,7 @@ enum Store {
 
     static func addCompanyPhone(companyId: String, key: String) {
         Database.shared.run("UPDATE companies SET phones = trim(phones || ' ' || ?) WHERE id=?", key, companyId)
+        bumpDataVersion()
     }
 
     // MARK: Oproepen en meetings
@@ -236,6 +247,23 @@ enum Store {
                             key, match.companyId, match.companyName, match.skip)
     }
 
+    // MARK: Bewaartermijn
+
+    /// Activiteit, gesprekken en genegeerde/toegewezen blokken ouder dan 90 dagen wissen.
+    static func pruneOldActivity(days: Int = 90) {
+        let limit = Date().timeIntervalSince1970 - Double(days) * 86400
+        for table in ["activity", "calls", "dismissed", "assignments", "pushed"] {
+            Database.shared.run("DELETE FROM \(table) WHERE end < ?", limit)
+        }
+    }
+
+    /// "Wis mijn activiteit": alles wat bijgehouden werd, niet de regels of instellingen.
+    static func wipeActivity() {
+        for table in ["activity", "calls", "dismissed", "assignments"] {
+            Database.shared.run("DELETE FROM \(table)")
+        }
+    }
+
     // MARK: Zelf toegewezen blokken
 
     struct Assignment {
@@ -268,6 +296,10 @@ enum Store {
                 Database.shared.run("INSERT INTO pushed(tl_id, start, end) VALUES (?,?,?)", teamleaderId, p.start, p.end)
             }
         }
+    }
+
+    static func deletePushed(teamleaderId: String) {
+        Database.shared.run("DELETE FROM pushed WHERE tl_id=?", teamleaderId)
     }
 
     static func pushedParts(ids: [String]) -> [String: [(Double, Double)]] {

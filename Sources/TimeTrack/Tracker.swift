@@ -11,6 +11,7 @@ final class Tracker: ObservableObject {
     @Published var paused = UserDefaults.standard.bool(forKey: "paused") {
         didSet {
             UserDefaults.standard.set(paused, forKey: "paused")
+            UserDefaults.standard.set(Date(), forKey: "pausedAt")
             lastKey = nil
         }
     }
@@ -66,9 +67,16 @@ final class Tracker: ObservableObject {
         tick()
     }
 
+    /// De eerste keer de vraag van macOS tonen (die zet TimeTrack meteen in de lijst); daarna rechtstreeks
+    /// het juiste scherm in Systeeminstellingen openen, want macOS toont de vraag maar één keer.
     func requestAccessibility() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        hasAccessibility = AXIsProcessTrustedWithOptions(options)
+        if !UserDefaults.standard.bool(forKey: "axPrompted") {
+            UserDefaults.standard.set(true, forKey: "axPrompted")
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            hasAccessibility = AXIsProcessTrustedWithOptions(options)
+        } else {
+            SystemSettings.open("Privacy_Accessibility")
+        }
     }
 
     /// Bij vergrendelen of slaapstand: de tijd sinds de laatste muis-/toetsenbordactie telt niet als werk.
@@ -91,7 +99,12 @@ final class Tracker: ObservableObject {
 
         let now = Date().timeIntervalSince1970
         defer { lastTick = now }
-        if paused { statusText = "Gepauzeerd"; lastKey = nil; return }
+        if paused, let since = UserDefaults.standard.object(forKey: "pausedAt") as? Date,
+           !Calendar.current.isDateInToday(since) {
+            // Een vergeten pauze stopt de volgende dag vanzelf.
+            paused = false
+        }
+        if paused { statusText = "Bijhouden gepauzeerd"; lastKey = nil; return }
         if sleeping || screenLocked { statusText = "Scherm vergrendeld"; lastKey = nil; return }
         guard let window = Self.activeWindow() else { statusText = "Geen actief venster"; lastKey = nil; return }
 
@@ -188,39 +201,33 @@ final class Tracker: ObservableObject {
         CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
     }
 
-    /// Programma's waarvan een "scherm wakker houden" altijd op een call wijst, ook op de achtergrond.
-    private static let callApps = ["zoom.us", "Microsoft Teams", "MSTeams", "FaceTime", "Webex", "Slack", "Around"]
+    /// Programma's waarvan een "scherm wakker houden" op een gesprek of presentatie wijst.
+    private static let callApps = ["zoom.us", "Microsoft Teams", "MSTeams", "FaceTime", "Webex", "Slack", "Around",
+                                   "Keynote", "Microsoft PowerPoint", "Loom", "Flow"]
 
-    /// True wanneer het actieve programma (bv. Meet in de browser, Keynote) of een call-app het scherm wakker
-    /// houdt. Een video in een ander venster, caffeinate of Amphetamine tellen niet.
-    static func callOrPresentationActive(frontmost bundleId: String) -> Bool {
+    /// Paden van de programma's die nu het scherm wakker houden (één keer opvragen per ronde).
+    static func displayAwakeHolders() -> [String] {
         var byProcess: Unmanaged<CFDictionary>?
         guard IOPMCopyAssertionsByProcess(&byProcess) == kIOReturnSuccess,
-              let dict = byProcess?.takeRetainedValue() as? [NSNumber: [[String: Any]]] else { return false }
-        let frontPath = NSWorkspace.shared.frontmostApplication?.bundleURL?.path
-        for (pid, assertions) in dict {
+              let dict = byProcess?.takeRetainedValue() as? [NSNumber: [[String: Any]]] else { return [] }
+        return dict.compactMap { pid, assertions in
             let keepsDisplayOn = assertions.contains {
                 ($0["AssertType"] as? String) == "PreventUserIdleDisplaySleep"
                     || ($0["AssertionTrueType"] as? String) == "PreventUserIdleDisplaySleep"
             }
-            guard keepsDisplayOn, let path = processPath(pid.int32Value) else { continue }
-            if let frontPath, path.hasPrefix(frontPath) { return true }
-            if callApps.contains(where: { path.contains("/\($0).app/") }) { return true }
+            return keepsDisplayOn ? processPath(pid.int32Value) : nil
         }
-        return false
     }
 
-    /// True wanneer dit programma (bv. "zoom.us", "Microsoft Teams") nu het scherm wakker houdt: een gesprek loopt.
-    static func appKeepsDisplayAwake(named name: String) -> Bool {
-        var byProcess: Unmanaged<CFDictionary>?
-        guard IOPMCopyAssertionsByProcess(&byProcess) == kIOReturnSuccess,
-              let dict = byProcess?.takeRetainedValue() as? [NSNumber: [[String: Any]]] else { return false }
-        return dict.contains { pid, assertions in
-            assertions.contains {
-                ($0["AssertType"] as? String) == "PreventUserIdleDisplaySleep"
-                    || ($0["AssertionTrueType"] as? String) == "PreventUserIdleDisplaySleep"
-            } && (processPath(pid.int32Value)?.contains("/\(name)") ?? false)
-        }
+    /// True tijdens een gesprek, presentatie of video: een call-app of Keynote/PowerPoint houdt het scherm wakker,
+    /// of het programma vooraan doet dat (bv. een meeting of een uitlegvideo in de browser: ook dat is werk).
+    /// Hulpjes als caffeinate of Amphetamine tellen niet; de tracker begrenst dit op 2 uur zonder invoer.
+    static func callOrPresentationActive(frontmost bundleId: String) -> Bool {
+        let holders = displayAwakeHolders()
+        guard !holders.isEmpty else { return false }
+        if holders.contains(where: { path in callApps.contains { path.contains("/\($0).app/") } }) { return true }
+        guard let front = NSWorkspace.shared.frontmostApplication?.bundleURL?.path else { return false }
+        return holders.contains { $0.hasPrefix(front) }
     }
 
     private static func processPath(_ pid: Int32) -> String? {
@@ -243,6 +250,30 @@ enum Browser {
     private static var running = false
 
     static var isEnabled: Bool { !UserDefaults.standard.bool(forKey: "browserDisabled") }
+
+    enum Permission { case granted, denied, unknown }
+
+    /// Gaf de gebruiker toestemming om de geopende browsers uit te lezen? (Enkel na te gaan voor browsers die draaien.)
+    static func automationPermission() -> Permission {
+        let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)
+            .filter { $0 == "com.apple.Safari" || chromium.contains($0) }
+        var result = Permission.unknown
+        for bundleId in running {
+            let target = NSAppleEventDescriptor(bundleIdentifier: bundleId)
+            let status = AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, false)
+            if status == 0 { result = .granted }
+            if status == OSStatus(errAEEventNotPermitted) { return .denied }
+        }
+        return result
+    }
+
+    /// Laatst gekend domein, zonder een nieuwe lezing te starten.
+    static func cachedHost(bundleId: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        let known = cache[bundleId]
+        return known?.isEmpty == false ? known : nil
+    }
 
     /// Laatst gekend domein voor deze browser (bv. "janssen.be"), en start op de achtergrond een nieuwe lezing.
     static func host(bundleId: String) -> String? {

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 import UserNotifications
 
 /// Controleert GitHub Releases op een nieuwere versie en installeert ze in place.
@@ -66,10 +67,21 @@ final class Updater: ObservableObject {
                 throw NSError(domain: "TimeTrack", code: 2, userInfo: [NSLocalizedDescriptionKey:
                     "Geen schrijfrechten in \((dest as NSString).deletingLastPathComponent). Installeer opnieuw via tools.mtea.be."])
             }
-            // Na het afsluiten: oude app vervangen en de nieuwe starten.
+            // Enkel een versie die met hetzelfde certificaat ondertekend is (niet zomaar een download).
+            guard Self.signedLikeThisApp(newApp) else {
+                throw NSError(domain: "TimeTrack", code: 3, userInfo: [NSLocalizedDescriptionKey:
+                    "De handtekening van de nieuwe versie klopt niet. Installeer opnieuw via tools.mtea.be."])
+            }
+            // Na het afsluiten: eerst de nieuwe ernaast zetten, dan omwisselen. Mislukt iets, dan blijft de oude staan.
+            let staged = dest + ".nieuw"
+            let old = dest + ".oud"
+            let pid = ProcessInfo.processInfo.processIdentifier
             let script = """
-                sleep 1
-                rm -rf "\(dest)" && mv "\(newApp.path)" "\(dest)"
+                while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
+                rm -rf "\(staged)" "\(old)"
+                ditto "\(newApp.path)" "\(staged)" || exit 1
+                mv "\(dest)" "\(old)" && mv "\(staged)" "\(dest)" || { [ -d "\(old)" ] && [ ! -d "\(dest)" ] && mv "\(old)" "\(dest)"; }
+                rm -rf "\(old)"
                 xattr -dr com.apple.quarantine "\(dest)" 2>/dev/null
                 open "\(dest)"
                 """
@@ -82,6 +94,21 @@ final class Updater: ObservableObject {
             self.error = "Bijwerken mislukt: \(error.localizedDescription)"
             installing = false
         }
+    }
+
+    /// Voldoet de nieuwe app aan de vereiste van deze app (zelfde certificaat en identifier)?
+    /// Is deze app nog zonder vast certificaat ondertekend (ad hoc), dan kan dat niet gecontroleerd worden.
+    static func signedLikeThisApp(_ url: URL) -> Bool {
+        var me: SecCode?
+        var requirement: SecRequirement?
+        guard SecCodeCopySelf([], &me) == errSecSuccess, let me,
+              SecCodeCopyDesignatedRequirement(me, [], &requirement) == errSecSuccess, let requirement else { return true }
+        var text: CFString?
+        SecRequirementCopyString(requirement, [], &text)
+        if (text as String?)?.contains("cdhash") ?? true { return true }
+        var newCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &newCode) == errSecSuccess, let newCode else { return false }
+        return SecStaticCodeCheckValidity(newCode, SecCSFlags(rawValue: kSecCSCheckAllArchitectures), requirement) == errSecSuccess
     }
 
     private static func run(_ tool: String, _ args: [String]) throws {
@@ -159,7 +186,7 @@ final class Reminder: NSObject, UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         Task { @MainActor in
-            DayModel.shared.day = Date()
+            if !Calendar.current.isDateInToday(DayModel.shared.day) { DayModel.shared.day = Date() }
             AppDelegate.shared?.showMainWindow()
         }
         completionHandler()

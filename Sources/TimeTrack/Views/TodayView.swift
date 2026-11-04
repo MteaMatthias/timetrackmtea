@@ -11,54 +11,98 @@ final class DayModel: ObservableObject {
     @Published var day = Date()
     @Published private(set) var plan = DayPlan()
     @Published private(set) var loading = false
+    /// Eén registratie tegelijk, over het venster én het menubalk-paneel heen (geen dubbels).
     @Published private(set) var busy = false
+    private static var registering = false
+    private var generation = 0
+    /// De laatste registratie, om ze ongedaan te kunnen maken.
+    @Published private(set) var lastRegistration: (id: String, label: String, parts: [Proposal.Part])?
     /// False als de registraties uit Teamleader niet opgehaald konden worden: dan niets registreren.
     @Published private(set) var registeredLoaded = false
     @Published var error: String?
     /// Aanpassingen op kaartjes (klant, omschrijving, duur…), per voorstel-id; overleven het herladen.
     @Published var edits: [String: Proposal] = [:]
 
-    var canRegister: Bool { Teamleader.shared.isConnected && registeredLoaded && !busy }
+    var canRegister: Bool { Teamleader.shared.isConnected && registeredLoaded && !busy && !Self.registering }
 
     var dismissedCount: Int {
         let (lo, hi) = Store.dayBounds(day)
         return Store.dismissed(from: lo, to: hi).count
     }
 
-    func proposalToRegister(_ p: Proposal) -> Proposal { edits[p.id] ?? p }
+    /// Aanpassingen op een kaart gelden ook in het menubalk-paneel (gedeeld met het hoofdvenster).
+    func proposalToRegister(_ p: Proposal) -> Proposal { edits[p.id] ?? DayModel.shared.edits[p.id] ?? p }
 
     func reload() async {
+        generation += 1
+        let gen = generation
+        let day = self.day
         let (lo, hi) = Store.dayBounds(day)
         loading = true
-        defer { loading = false }
+        defer { if gen == generation { loading = false } }
         var registered: [Registered] = []
-        registeredLoaded = false
+        var loaded = false
+        var failure: String?
         if Teamleader.shared.isConnected {
             do {
                 try? await Teamleader.shared.syncCompanies(force: false)
                 registered = try await Teamleader.shared.registered(from: lo, to: hi)
-                registeredLoaded = true
-                error = nil
+                loaded = true
+            } catch is CancellationError {
+                return
             } catch {
-                self.error = error.localizedDescription
+                failure = error.localizedDescription
             }
         }
-        plan = Planner.plan(day: day, registered: registered, matcher: Matcher.current(), roundTo: Prefs.roundTo,
-                            bundle: Prefs.bundlePerClient)
-        let ids = Set(plan.proposals.map(\.id))
+        // Het voorstel berekenen op de achtergrond, zodat het venster vlot blijft.
+        let roundTo = Prefs.roundTo, bundle = Prefs.bundlePerClient, entries = registered
+        let computed = await Task.detached(priority: .userInitiated) {
+            Planner.plan(day: day, registered: entries, matcher: Matcher.current(), roundTo: roundTo, bundle: bundle)
+        }.value
+        // Intussen een andere dag gekozen of opnieuw geladen: dit resultaat is verouderd.
+        guard gen == generation else { return }
+        plan = computed
+        registeredLoaded = loaded
+        error = failure
+        let ids = Set(computed.proposals.map(\.id))
         edits = edits.filter { ids.contains($0.key) }
+    }
+
+    /// Starttijd in Teamleader: het eerste blok, maar opgeschoven tot er niets overlapt met wat al in
+    /// Teamleader staat (een gebundelde registratie telt de blokken op en zou anders overlappen).
+    private func startTime(for p: Proposal, taken: [(Double, Double)]) -> Double {
+        var start = p.start
+        var moved = true
+        while moved {
+            moved = false
+            for (a, b) in taken where start < b && start + p.seconds > a {
+                start = b
+                moved = true
+            }
+        }
+        let (_, dayEnd) = Store.dayBounds(day)
+        return start + p.seconds <= dayEnd ? start : p.start
+    }
+
+    private var takenIntervals: [(Double, Double)] {
+        plan.registered.compactMap { r in r.start.map { ($0, $0 + r.duration) } }
     }
 
     /// Maakt de registratie in Teamleader; geeft een foutmelding terug of nil.
     func register(_ p: Proposal, learn: Rule? = nil) async -> String? {
+        guard !Self.registering else { return "Er wordt al iets geregistreerd, even geduld." }
+        Self.registering = true
         busy = true
-        defer { busy = false }
+        defer { busy = false; Self.registering = false }
         do {
-            let id = try await Teamleader.shared.addTime(start: p.start, end: p.start + p.seconds, match: p.match,
+            let start = startTime(for: p, taken: takenIntervals)
+            let id = try await Teamleader.shared.addTime(start: start, end: start + p.seconds, match: p.match,
                                                          description: p.description, invoiceable: p.match.invoiceable)
             Store.savePushed(teamleaderId: id, parts: p.parts)
             if let learn { Store.save(learn) }
             edits[p.id] = nil
+            DayModel.shared.edits[p.id] = nil
+            lastRegistration = (id, "\(p.match.companyName) · \(formatDuration(p.seconds))", p.parts)
             AppModel.shared.changed()
             await reload()
             return nil
@@ -68,22 +112,43 @@ final class DayModel: ObservableObject {
     }
 
     func registerAll(_ proposals: [Proposal]) async {
+        guard !Self.registering else { return }
+        Self.registering = true
         busy = true
-        defer { busy = false }
+        defer { busy = false; Self.registering = false }
         var failures: [String] = []
+        var taken = takenIntervals
         for p in proposals {
             do {
-                let id = try await Teamleader.shared.addTime(start: p.start, end: p.start + p.seconds, match: p.match,
+                let start = startTime(for: p, taken: taken)
+                let id = try await Teamleader.shared.addTime(start: start, end: start + p.seconds, match: p.match,
                                                              description: p.description, invoiceable: p.match.invoiceable)
                 Store.savePushed(teamleaderId: id, parts: p.parts)
+                taken.append((start, start + p.seconds))
                 edits[p.id] = nil
+                DayModel.shared.edits[p.id] = nil
             } catch {
                 failures.append("\(p.match.companyName): \(error.localizedDescription)")
             }
         }
+        lastRegistration = nil
         AppModel.shared.changed()
         await reload()
         if !failures.isEmpty { error = "Niet gelukt: " + failures.joined(separator: "; ") }
+    }
+
+    /// Verwijdert de laatste registratie weer uit Teamleader.
+    func undoLastRegistration() async {
+        guard let last = lastRegistration else { return }
+        do {
+            try await Teamleader.shared.deleteTime(id: last.id)
+            Store.deletePushed(teamleaderId: last.id)
+            lastRegistration = nil
+            AppModel.shared.changed()
+            await reload()
+        } catch {
+            self.error = "Ongedaan maken mislukt: \(error.localizedDescription)"
+        }
     }
 
     func dismiss(_ p: Proposal) {
@@ -207,6 +272,11 @@ struct TodayView: View {
 
     @ViewBuilder
     private var banners: some View {
+        if let last = model.lastRegistration {
+            Banner(icon: "checkmark.circle.fill", tint: .green, text: "Geregistreerd in Teamleader: \(last.label)") {
+                Button("Ongedaan maken") { Task { await model.undoLastRegistration() } }
+            }
+        }
         if let error = model.error {
             Banner(icon: "exclamationmark.triangle.fill", tint: .orange, text: error)
         }
@@ -452,6 +522,7 @@ struct ProposalCard: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .disabled(!model.canRegister || !proposal.match.isAssigned || working)
+                    .help(proposal.match.isAssigned ? "Registreer in Teamleader" : "Kies eerst een klant")
                 }
             }
         }
@@ -513,7 +584,9 @@ struct ProposalCard: View {
         defer { working = false }
         var rule: Rule?
         if remember && learnable {
-            rule = Rule(field: "any", pattern: original.learnPattern, companyId: proposal.match.companyId,
+            // "|" scheidt trefwoorden in een regel: niet uit een chattitel overnemen.
+            rule = Rule(field: "any", pattern: original.learnPattern.replacingOccurrences(of: "|", with: " "),
+                        companyId: proposal.match.companyId,
                         companyName: proposal.match.companyName, workTypeId: proposal.match.workTypeId,
                         workTypeName: proposal.match.workTypeName, invoiceable: proposal.match.invoiceable)
         }

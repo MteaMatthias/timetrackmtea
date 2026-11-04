@@ -346,7 +346,10 @@ final class Teamleader: ObservableObject {
             "started_after": iso.string(from: Date(timeIntervalSince1970: from - 86400)),
             "started_before": iso.string(from: Date(timeIntervalSince1970: to)),
         ]
-        if let userId { filter["user_id"] = userId }
+        // Altijd enkel de eigen registraties (een beheerder zou anders die van collega's zien).
+        if userId == nil { try await refreshProfile() }
+        guard let userId else { throw TLError.auth("je gebruikersprofiel in Teamleader kon niet gelezen worden") }
+        filter["user_id"] = userId
         var out: [Registered] = []
         for page in 1...20 {
             let result = try await call("timeTracking.list", ["filter": filter, "page": ["size": 100, "number": page]])
@@ -404,6 +407,10 @@ final class Teamleader: ObservableObject {
         return (result["data"] as? [String: Any])?["id"] as? String ?? "ok"
     }
 
+    func deleteTime(id: String) async throws {
+        _ = try await call("timeTracking.delete", ["id": id])
+    }
+
     private func list(_ endpoint: String, _ body: [String: Any]) async throws -> [TLItem] {
         let result = try await call(endpoint, body)
         return (result["data"] as? [[String: Any]] ?? []).compactMap { item -> TLItem? in
@@ -429,7 +436,8 @@ final class Teamleader: ObservableObject {
                 refreshed = true
             case 429 where attempt < 4:
                 // Teamleader laat ongeveer 200 calls per minuut toe.
-                let wait = Double(response.value(forHTTPHeaderField: "Retry-After") ?? "") ?? 10
+                let wait = Double(response.value(forHTTPHeaderField: "Retry-After") ?? "")
+                    ?? Self.secondsUntil(response.value(forHTTPHeaderField: "X-RateLimit-Reset")) ?? 10
                 try await Task.sleep(nanoseconds: UInt64(min(max(wait, 2), 60) * 1_000_000_000))
             default:
                 throw TLError.api(response.statusCode, Self.errorMessage(data))
@@ -510,6 +518,14 @@ final class Teamleader: ObservableObject {
             throw TLError.invalidGrant
         }
         throw TLError.api(status, message)
+    }
+
+    /// X-RateLimit-Reset kan een tijdstip (ISO 8601 of Unix-tijd) of een aantal seconden zijn.
+    private static func secondsUntil(_ header: String?) -> Double? {
+        guard let header, !header.isEmpty else { return nil }
+        if let date = ISO8601DateFormatter().date(from: header) { return max(1, date.timeIntervalSinceNow) }
+        guard let value = Double(header) else { return nil }
+        return value > 1_000_000_000 ? max(1, value - Date().timeIntervalSince1970) : value
     }
 
     private static func errorMessage(_ data: Data) -> String {

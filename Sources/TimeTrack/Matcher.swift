@@ -48,6 +48,7 @@ final class Matcher {
     private let byName: [(name: String, company: Company)]
     private let byPhone: [String: Company]
     private var cache: [String: (Match, String)] = [:]
+    private let cacheLock = NSLock()
 
     /// Domeinen van mailproviders, online tools en sociale media zeggen niets over de klant
     /// (ook al staan sommige als leverancier in Teamleader). Subdomeinen tellen mee.
@@ -95,6 +96,7 @@ final class Matcher {
         var set = excludedCompanies
         if excluded { set.insert(companyId) } else { set.remove(companyId) }
         UserDefaults.standard.set(Array(set), forKey: "excludedCompanies")
+        Store.bumpDataVersion()
     }
 
     /// Woorden die een bedrijfsnaam niet herkenbaar maken in een venstertitel.
@@ -106,9 +108,19 @@ final class Matcher {
     private let defaultInvoiceable: Bool
 
     /// Matcher met de huidige instellingen (regels, bedrijven, eigen domein, standaard factureerbaar).
+    /// Hergebruikt zolang regels, bedrijven en uitsluitingen niet veranderden (Store.dataVersion),
+    /// zodat herkenningen in de cache blijven en niet alles opnieuw uit de database komt.
     static func current() -> Matcher {
-        Matcher(defaultInvoiceable: UserDefaults.standard.object(forKey: "tlInvoiceable") as? Bool ?? true)
+        currentLock.lock()
+        defer { currentLock.unlock() }
+        let version = Store.dataVersion
+        if let cached = currentCache, cached.version == version { return cached.matcher }
+        let matcher = Matcher(defaultInvoiceable: UserDefaults.standard.object(forKey: "tlInvoiceable") as? Bool ?? true)
+        currentCache = (matcher, version)
+        return matcher
     }
+    private static var currentCache: (matcher: Matcher, version: Int)?
+    private static let currentLock = NSLock()
 
     init(rules: [Rule] = Store.rules(), companies: [Company] = Store.companies(),
          ownDomain: String? = UserDefaults.standard.string(forKey: "tlOwnDomain"),
@@ -164,9 +176,14 @@ final class Matcher {
     /// Match voor een venster. De reden is kort en leesbaar, bv. "website janssen.be".
     func match(app: String, title: String, host: String) -> (Match, String) {
         let cacheKey = [app, title, host].joined(separator: "\u{1}")
-        if let hit = cache[cacheKey] { return hit }
+        cacheLock.lock()
+        let hit = cache[cacheKey]
+        cacheLock.unlock()
+        if let hit { return hit }
         let result = compute(app: app, title: title, host: host)
+        cacheLock.lock()
         cache[cacheKey] = result
+        cacheLock.unlock()
         return result
     }
 
@@ -181,16 +198,14 @@ final class Matcher {
 
     /// Haalt de browsernaam en wat erna komt (profielnaam) van een venstertitel:
     /// "TPC Cloud - Google Chrome - Matthias" → "TPC Cloud".
+    /// Enkel aan het einde: " - Google Chrome", eventueel gevolgd door " - <profiel>". Een titel als
+    /// "Offerte - Architectenbureau Janssen" blijft dus heel.
     static func cleanTitle(_ title: String) -> String {
-        let browsers = ["Google Chrome", "Microsoft Edge", "Microsoft\u{200B} Edge", "Brave", "Vivaldi", "Opera", "Arc",
-                        "Safari", "Firefox", "Mozilla Firefox", "Chromium"]
-        var t = title
-        for b in browsers {
-            for sep in [" - ", " — ", " – "] {
-                if let r = t.range(of: sep + b) { t = String(t[..<r.lowerBound]) }
-            }
+        let pattern = #"\s[-–—]\s(Google Chrome|Microsoft\x{200B}? ?Edge|Brave|Vivaldi|Opera|Arc|Safari|Mozilla Firefox|Firefox|Chromium)(\s[-–—]\s[^-–—]{1,40})?$"#
+        guard let r = title.range(of: pattern, options: .regularExpression) else {
+            return title.trimmingCharacters(in: .whitespaces)
         }
-        return t.trimmingCharacters(in: .whitespaces)
+        return String(title[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
     }
 
     private func compute(app: String, title rawTitle: String, host: String) -> (Match, String) {

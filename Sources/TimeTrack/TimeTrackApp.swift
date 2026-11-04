@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             UserDefaults.standard.set(true, forKey: "launchAtLoginAsked")
             try? LaunchAtLogin.set(true)
         }
+        Store.pruneOldActivity()
         Tracker.shared.start()
         Reminder.shared.start()
         Task { @MainActor in CallWatcher.shared.start() }
@@ -100,7 +101,8 @@ struct MenuContent: View {
     @ObservedObject private var teamleader = Teamleader.shared
     let open: () -> Void
 
-    private var ready: [Proposal] { model.plan.proposals.filter { $0.match.isAssigned } }
+    @ObservedObject private var updater = Updater.shared
+    private var ready: [Proposal] { model.plan.proposals.map(model.proposalToRegister).filter { $0.match.isAssigned } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -114,7 +116,6 @@ struct MenuContent: View {
             if !tracker.hasAccessibility {
                 Button {
                     tracker.requestAccessibility()
-                    SystemSettings.open("Privacy_Accessibility")
                 } label: {
                     Label("Geen toegang tot vensters – toestemming geven", systemImage: "exclamationmark.triangle.fill")
                 }
@@ -138,7 +139,7 @@ struct MenuContent: View {
                             Text(formatDuration(p.seconds)).monospacedDigit().foregroundStyle(.secondary)
                             if p.match.isAssigned {
                                 Button {
-                                    Task { _ = await model.register(p) }
+                                    Task { _ = await model.register(model.proposalToRegister(p)) }
                                 } label: { Image(systemName: "checkmark.circle.fill") }
                                 .buttonStyle(.borderless)
                                 .foregroundStyle(.green)
@@ -160,11 +161,20 @@ struct MenuContent: View {
             if let error = model.error {
                 Text(error).font(.caption).foregroundStyle(.red).lineLimit(3)
             }
+            if updater.updateAvailable, let latest = updater.latest {
+                Button {
+                    Task { await updater.install() }
+                } label: {
+                    Label(updater.installing ? "Bezig met bijwerken…" : "Nieuwe versie \(latest) installeren",
+                          systemImage: "arrow.down.circle.fill")
+                }
+                .disabled(updater.installing)
+            }
 
             HStack {
                 Button {
                     AppModel.shared.tab = 0
-                    DayModel.shared.day = Date()
+                    if !Calendar.current.isDateInToday(DayModel.shared.day) { DayModel.shared.day = Date() }
                     open()
                 } label: { Label("Open TimeTrack", systemImage: "macwindow") }
                     .buttonStyle(.borderedProminent)
@@ -175,7 +185,7 @@ struct MenuContent: View {
                 }
                 Spacer()
                 Menu {
-                    Button(tracker.paused ? "Hervat registratie" : "Pauzeer registratie") { tracker.paused.toggle() }
+                    Button(tracker.paused ? "Bijhouden hervatten" : "Bijhouden pauzeren") { tracker.paused.toggle() }
                     Button("Instellingen…") {
                         AppModel.shared.tab = 3
                         open()
@@ -259,7 +269,7 @@ struct MainView: View {
             HStack(spacing: 8) {
                 Circle().fill(tracker.paused ? Color.orange : tracker.hasAccessibility ? Color.green : Color.red)
                     .frame(width: 8, height: 8)
-                Text(tracker.paused ? "Gepauzeerd" : tracker.hasAccessibility ? "Registreert" : "Geen toegang")
+                Text(tracker.paused ? "Gepauzeerd" : tracker.hasAccessibility ? "Houdt bij" : "Geen toegang")
                     .font(.caption)
             }
             Text(teamleader.userName.map { "Teamleader: \($0)" } ?? "Teamleader niet verbonden")
