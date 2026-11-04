@@ -100,9 +100,11 @@ final class Updater: ObservableObject {
     /// Is deze app nog zonder vast certificaat ondertekend (ad hoc), dan kan dat niet gecontroleerd worden.
     static func signedLikeThisApp(_ url: URL) -> Bool {
         var me: SecCode?
+        var meStatic: SecStaticCode?
         var requirement: SecRequirement?
         guard SecCodeCopySelf([], &me) == errSecSuccess, let me,
-              SecCodeCopyDesignatedRequirement(me, [], &requirement) == errSecSuccess, let requirement else { return true }
+              SecCodeCopyStaticCode(me, [], &meStatic) == errSecSuccess, let meStatic,
+              SecCodeCopyDesignatedRequirement(meStatic, [], &requirement) == errSecSuccess, let requirement else { return true }
         var text: CFString?
         SecRequirementCopyString(requirement, [], &text)
         if (text as String?)?.contains("cdhash") ?? true { return true }
