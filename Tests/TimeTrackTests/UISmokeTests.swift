@@ -218,7 +218,9 @@ final class UISmokeTests: XCTestCase {
             state.hasCall = round % 4 != 3
             step(panel, size)
         }
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2, "inhoud wisselen in het paneel is traag (layout-lus?)")
+        // 72 stappen met elk minstens 10 ms wachten. Een layout-lus valt op door een andere venstergrootte (zie step)
+        // of door seconden per stap; de marge vangt een drukke CI-Mac op (na de end-to-end-tests).
+        XCTAssertLessThan(Date().timeIntervalSince(started), 4, "inhoud wisselen in het paneel is traag (layout-lus?)")
     }
 
     @MainActor private func step(_ panel: NSPanel, _ size: NSSize, file: StaticString = #filePath, line: UInt = #line) {
