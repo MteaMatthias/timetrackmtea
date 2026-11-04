@@ -421,4 +421,53 @@ final class PlannerTests: XCTestCase {
         let (match, _) = Matcher(excluded: [], ownNames: ["Matthias Rijnwalt"]).match(app: "Mail", title: "Offerte voor Matthias Rijnwalt", host: "")
         XCTAssertFalse(match.isAssigned)
     }
+
+    // MARK: Bevindingen onafhankelijke controle
+
+    func testBundlingKeepsShortBlockBetweenOtherClient() {
+        activity(t(9), t(9, 20), host: "janssen.be")
+        activity(t(9, 20), t(9, 24), host: "bakkerijpeeters.be")
+        activity(t(9, 24), t(9, 44), host: "janssen.be")
+        let p = plan(bundle: true)
+        XCTAssertEqual(p.proposals.first { $0.match.companyId == "c-janssen" }?.seconds ?? 0, 40 * 60, accuracy: 1)
+        XCTAssertEqual(p.proposals.first { $0.match.companyId == "c-peeters" }?.seconds ?? 0, 0, accuracy: 1,
+                       "4 min alleen is nog geen voorstel, maar mag ook niet bij Janssen")
+    }
+
+    func testAlternatingShortBlocksKeepTheirClient() {
+        for i in 0..<6 {
+            activity(t(9, i * 8), t(9, i * 8 + 4), host: "janssen.be")
+            activity(t(9, i * 8 + 4), t(9, i * 8 + 8), host: "bakkerijpeeters.be")
+        }
+        let p = plan(bundle: true)
+        XCTAssertEqual(p.proposals.first { $0.match.companyId == "c-janssen" }?.seconds ?? 0, 24 * 60, accuracy: 1)
+        XCTAssertEqual(p.proposals.first { $0.match.companyId == "c-peeters" }?.seconds ?? 0, 24 * 60, accuracy: 1)
+    }
+
+    func testTitleCleaningOnlyAtTheEnd() {
+        XCTAssertEqual(Matcher.cleanTitle("Offerte - Architectenbureau Janssen"), "Offerte - Architectenbureau Janssen")
+        XCTAssertEqual(Matcher.cleanTitle("Offerte - Architectenbureau Janssen - Google Chrome"), "Offerte - Architectenbureau Janssen")
+        XCTAssertEqual(Matcher.cleanTitle("Inbox - Arc"), "Inbox")
+    }
+
+    func testFlowHistoryWordsAreNotACall() {
+        // "Inkomende oproep" in de oproepgeschiedenis, zonder de knoppen van het gesprekspaneel.
+        XCTAssertNil(FlowReader.parse(["Oproepgeschiedenis", "Inkomende oproep", "0493 29 50 63", "Verwijderen", "07:17"]))
+    }
+
+    func testVideoBetweenClientWorkGetsThatClient() {
+        activity(t(9), t(10), host: "janssen.be")
+        activity(t(10), t(10, 25), title: "Hoe werkt X - YouTube", host: "youtube.com")
+        let p = plan()
+        XCTAssertEqual(p.proposals.count, 1)
+        XCTAssertEqual(p.proposals.first?.end, t(10, 25))
+    }
+
+    func testPruneRemovesOnlyOldActivity() {
+        let old = Date().timeIntervalSince1970 - 100 * 86400
+        activity(old, old + 600, host: "janssen.be")
+        activity(t(9), t(9, 10), host: "janssen.be")
+        Store.pruneOldActivity()
+        XCTAssertEqual(Database.shared.query("SELECT COUNT(*) AS n FROM activity").first?.int("n"), 1)
+    }
 }
