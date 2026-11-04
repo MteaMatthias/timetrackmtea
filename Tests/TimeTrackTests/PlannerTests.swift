@@ -491,6 +491,40 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(p.proposals.first?.duration ?? 0, 3600, accuracy: 1)
     }
 
+    func testEveryMailInsideABlockIsItsOwnPiece() {
+        // Twee mails in hetzelfde programma: apart toe te wijzen, ook al is het telkens "Mail".
+        activity(t(10, 58), t(11, 1), app: "Mail", title: "Re: Bouw Wannegem")
+        activity(t(11, 1), t(11, 5), app: "Mail", title: "Re: Recht van opstal")
+        activity(t(11, 5), t(11, 9), app: "Claude", title: "Claude")
+        let p = plan()
+        let labels = p.proposals.flatMap { $0.pieces.map(\.label) }
+        XCTAssertTrue(labels.contains("Mail: Re: Bouw Wannegem"), "\(labels)")
+        XCTAssertTrue(labels.contains("Mail: Re: Recht van opstal"), "\(labels)")
+        guard let mail = p.proposals.flatMap(\.pieces).first(where: { $0.label == "Mail: Re: Recht van opstal" })
+        else { return XCTFail("geen deel voor de mail") }
+        XCTAssertEqual(mail.start, t(11, 1))
+        XCTAssertEqual(mail.end, t(11, 5))
+    }
+
+    func testShortCompanyNameWithAmpersandIsRecognisedInAMailSubject() {
+        Store.replaceCompanies([janssen, Company(id: "c-mm", name: "M&M bv", domains: [])])
+        let (m, _) = Matcher(ownDomain: "mtea.be", excluded: [], ownNames: [])
+            .match(app: "Mail", title: "Re: Recht van opstal M&M bv", host: "")
+        XCTAssertEqual(m.companyId, "c-mm")
+        // Losse letters blijven geen klant.
+        let (n, _) = Matcher(ownDomain: "mtea.be", excluded: [], ownNames: [])
+            .match(app: "Mail", title: "Re: m en m", host: "")
+        XCTAssertFalse(n.isAssigned)
+    }
+
+    func testOnlyASpecificSubjectIsOfferedToRemember() {
+        XCTAssertEqual(ActivityAssignView.learnPattern("Mail: Re: Recht van opstal M&M bv"), "recht van opstal m&m bv")
+        XCTAssertEqual(ActivityAssignView.learnPattern("Mail: FW: Re: Offerte dakwerken"), "offerte dakwerken")
+        XCTAssertNil(ActivityAssignView.learnPattern("Mail: Alle inkomende – 144.066 berichten, 12.341 ongelezen"))
+        XCTAssertNil(ActivityAssignView.learnPattern("Google Chrome: gmail.com"))
+        XCTAssertNil(ActivityAssignView.learnPattern("Claude"))
+    }
+
     func testPiecesShowWhatHappenedInsideABlock() {
         activity(t(9), t(9, 20), host: "janssen.be")
         activity(t(9, 20), t(9, 40), app: "Microsoft Word", title: "Offerte Janssen.docx")

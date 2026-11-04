@@ -159,7 +159,9 @@ final class Matcher {
 
     /// Kleine letters, leestekens weg, rechtsvormen weg; omringd door spaties voor woordgrenzen.
     static func normalize(_ s: String, stripLegalForms: Bool = false) -> String {
+        // "M&M" blijft één woord ("menm"), zodat ook een korte naam als "M&M bv" herkend wordt.
         let folded = s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            .replacingOccurrences(of: #"(?<=[a-z0-9])&(?=[a-z0-9])"#, with: "en", options: .regularExpression)
         let words = folded.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
         let kept = stripLegalForms ? words.filter { !legalForms.contains($0) } : words
         return kept.joined(separator: " ")

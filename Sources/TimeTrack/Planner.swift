@@ -472,14 +472,15 @@ enum Planner {
             d.sorted { $0.value > $1.value }.prefix(k).map { ($0.key, $0.value) }
         }
         let step = Double(max(roundTo, 1) * 60)
-        /// Opeenvolgende minuten met dezelfde hoofdactiviteit (label) en kandidaat-regel (learn).
+        /// Opeenvolgende minuten met dezelfde hoofdactiviteit (label, bv. "Mail: Re: Offerte Janssen") en
+        /// kandidaat-regel (learn). Per activiteit, zodat je binnen een blok elke mail of pagina apart kan toewijzen.
         func pieces(of r: Run) -> [(from: Int, to: Int, label: String, learn: String)] {
             var out: [(from: Int, to: Int, label: String, learn: String)] = []
             for x in r.from..<r.to {
                 let info = minutes[x][r.key]
                 let label = info?.activities.max { $0.value < $1.value }?.key ?? out.last?.label ?? "Pauze"
                 let learn = info?.learn.max { $0.value < $1.value }?.key ?? out.last?.learn ?? ""
-                if let last = out.last, last.learn == learn {
+                if let last = out.last, last.learn == learn, last.label == label {
                     out[out.count - 1].to = x + 1
                 } else {
                     out.append((x, x + 1, label, learn))

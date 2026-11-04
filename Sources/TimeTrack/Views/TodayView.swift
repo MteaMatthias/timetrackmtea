@@ -430,6 +430,7 @@ struct ProposalCard: View {
     @State private var working = false
     @State private var error: String?
     @State private var showDetails = false
+    @State private var assigningActivity: String?
     @State private var assigning: Proposal.Part?
 
     init(proposal: Proposal, model: DayModel) {
@@ -462,9 +463,13 @@ struct ProposalCard: View {
                 topRow
                 blocksRow
                 editRow
-                if showDetails {
+                if splittable || showDetails {
                     VStack(alignment: .leading, spacing: 3) {
-                        ForEach(proposal.activities, id: \.self) { Text("• \($0)") }
+                        if splittable {
+                            Text("Was een deel voor een andere klant? Klik bij die activiteit op ‘Klant…’.")
+                                .foregroundStyle(.tertiary)
+                        }
+                        ForEach(proposal.activities, id: \.self) { activityRow($0) }
                     }
                     .font(.caption).foregroundStyle(.secondary)
                 }
@@ -571,6 +576,36 @@ struct ProposalCard: View {
             }
         }
         .font(.callout)
+    }
+
+    /// Meer dan één activiteit in dit voorstel: dan kan je per activiteit een klant kiezen.
+    private var splittable: Bool { Set(original.pieces.map(\.label)).count > 1 }
+
+    /// "Mail: Re: Offerte · 2 min" → "Mail: Re: Offerte"
+    private static func activityLabel(_ line: String) -> String {
+        guard let r = line.range(of: " · ", options: .backwards) else { return line }
+        return String(line[..<r.lowerBound])
+    }
+
+    @ViewBuilder
+    private func activityRow(_ line: String) -> some View {
+        let label = Self.activityLabel(line)
+        let pieces = original.pieces.filter { $0.label == label }
+        HStack(spacing: 8) {
+            Text("• \(line)").lineLimit(1).truncationMode(.middle)
+            if splittable && !pieces.isEmpty {
+                Button("Klant…") { assigningActivity = label }
+                    .buttonStyle(.link)
+                    .help("Enkel ‘\(label)’ aan een (andere) klant toewijzen")
+                    .popover(isPresented: Binding(get: { assigningActivity == label },
+                                                  set: { if !$0 { assigningActivity = nil } })) {
+                        ActivityAssignView(label: label, pieces: pieces) {
+                            assigningActivity = nil
+                            AppModel.shared.changed()
+                        }
+                    }
+            }
+        }
     }
 
     private var reasonText: String {

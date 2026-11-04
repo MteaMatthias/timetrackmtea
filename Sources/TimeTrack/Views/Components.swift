@@ -310,3 +310,62 @@ struct BlockAssignView: View {
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.04)))
     }
 }
+
+/// Eén activiteit binnen een voorstel (bv. één mail) aan een klant toewijzen, met de keuze om dat te onthouden.
+struct ActivityAssignView: View {
+    @EnvironmentObject var teamleader: Teamleader
+    let label: String
+    let pieces: [Proposal.Piece]
+    let onDone: () -> Void
+    @State private var companyId: String?
+    @State private var companyName = ""
+    @State private var remember = false
+
+    /// Wat onthouden kan worden: het onderwerp of de titel zonder "Re:", "Fwd:"… (nooit een algemene site).
+    static func learnPattern(_ label: String) -> String? {
+        guard let colon = label.range(of: ": ") else { return nil }
+        var text = String(label[colon.upperBound...]).trimmingCharacters(in: .whitespaces)
+        while let r = text.range(of: #"^(re|fw|fwd|tr|antw|doorst|aw|wg)\s*:\s*"#, options: [.regularExpression, .caseInsensitive]) {
+            text.removeSubrange(r)
+        }
+        text = text.replacingOccurrences(of: "|", with: " ").trimmingCharacters(in: .whitespaces).lowercased()
+        guard text.count >= 6, !Matcher.isGeneric(text), !text.hasPrefix("alle inkomende"),
+              !text.contains("ongelezen") else { return nil }
+        return text
+    }
+
+    private var total: Double { pieces.reduce(0) { $0 + $1.end - $1.start } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(label).font(.headline).lineLimit(2)
+            Text(pieces.map { "\(formatTime($0.start))–\(formatTime($0.end))" }.joined(separator: ", ")
+                 + " · " + formatDuration(total))
+                .font(.callout).foregroundStyle(.secondary).lineLimit(2)
+            HStack(alignment: .top) {
+                CompanyField(id: $companyId, name: $companyName, compact: true)
+                Button("Toewijzen") {
+                    let match = Match(companyId: companyId, companyName: companyName)
+                    for p in pieces { Store.assign(start: p.start, end: p.end, to: match) }
+                    if remember, let pattern = Self.learnPattern(label) {
+                        Store.save(Rule(field: "title", pattern: pattern, companyId: companyId, companyName: companyName))
+                    }
+                    onDone()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(companyName.isEmpty)
+                Button("Geen werk") {
+                    for p in pieces { Store.dismiss(start: p.start, end: p.end) }
+                    onDone()
+                }
+            }
+            if let pattern = Self.learnPattern(label) {
+                Toggle("Onthoud: voortaan ‘\(pattern)’ → \(companyName.isEmpty ? "deze klant" : companyName)", isOn: $remember)
+                    .font(.callout).lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(width: 520, height: 300, alignment: .topLeading)
+    }
+}
