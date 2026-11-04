@@ -259,6 +259,75 @@ final class EndToEndTests: XCTestCase {
 
     // MARK: - d. Hoofdvenster, tabbladen, blok-popover en menubalkpaneel in hun echte containers
 
+    // MARK: - e. "Alles registreren": elk voorstel één keer, afgerond op 10 min, en alles ongedaan te maken
+
+    @MainActor func test5_RegisterAllBooksEveryProposalOnceAndCanBeUndone() async throws {
+        try await ensureTeamleader()
+        Store.replaceCompanies(E2EFakeTeamleader.companies.map {
+            Company(id: $0.id, name: $0.name, domains: $0.website.isEmpty ? [] : [$0.website],
+                    phones: $0.phones.compactMap(Phone.key))
+        })
+        let (lo, _) = Store.dayBounds(Date())
+        let now = Date().timeIntervalSince1970
+        let base = max(lo + 120, now - 7200)
+        guard now - base > 3600 else { throw skip("te kort na middernacht voor een testdag") }
+        func act(_ from: Double, _ to: Double, _ app: String, _ title: String, _ host: String) {
+            Database.shared.run("INSERT INTO activity(start, end, app, bundle, title, host) VALUES (?,?,?,?,?,?)",
+                                base + from * 60, base + to * 60, app, "", title, host)
+        }
+        act(0, 25, "Google Chrome", "Offerte", "janssen.be")
+        act(25, 40, "Google Chrome", "Bestelling", "bakkerijpeeters.be")
+        act(44, 55, "Figma", "Ontwerp zonder klant", "")
+        Store.save(CallRecord(start: base + 41 * 60, end: base + 44 * 60, kind: .phone, label: Self.number,
+                              detail: "M&M", memoryKey: Self.memoryKey, companyId: "c-mm", companyName: "M&M",
+                              confirmed: true))
+        let before = await reloadPlan()
+        let ready = before.proposals.map(DayModel.shared.proposalToRegister).filter { $0.match.isAssigned }
+        XCTAssertEqual(Set(ready.compactMap(\.match.companyId)), ["c-janssen", "c-peeters", "c-mm"],
+                       "voorstellen: \(describe(before.proposals))")
+        XCTAssertTrue(before.proposals.contains { !$0.match.isAssigned }, "het werk zonder klant hoort voorgesteld te blijven")
+        XCTAssertTrue(DayModel.shared.canRegister, "kan niet registreren: \(DayModel.shared.error ?? "-")")
+
+        await DayModel.shared.registerAll(ready)
+        XCTAssertNil(DayModel.shared.error, "fout na Alles registreren: \(DayModel.shared.error ?? "")")
+        let adds = E2EFakeTeamleader.adds
+        XCTAssertEqual(adds.count, ready.count, "elk voorstel precies één keer naar Teamleader: \(adds)")
+        XCTAssertEqual(Set(adds.compactMap { ($0["subject"] as? [String: Any])?["id"] as? String }),
+                       ["c-janssen", "c-peeters", "c-mm"])
+        for add in adds {
+            let duration = (add["duration"] as? NSNumber)?.intValue ?? 0
+            XCTAssertTrue(duration >= 600 && duration % 600 == 0, "niet naar boven afgerond op 10 min: \(add)")
+            XCTAssertFalse(((add["description"] as? String) ?? "").isEmpty, "geen omschrijving: \(add)")
+            let start = (add["started_at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }?.timeIntervalSince1970
+            XCTAssertNotNil(start)
+            if let start { XCTAssertGreaterThanOrEqual(start, lo, "begin vóór vandaag: \(add)") }
+        }
+        if let call = adds.first(where: { ($0["subject"] as? [String: Any])?["id"] as? String == "c-mm" }) {
+            XCTAssertEqual((call["duration"] as? NSNumber)?.intValue, 600, "3 min bellen = 10 min")
+            let start = (call["started_at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }?.timeIntervalSince1970
+            XCTAssertEqual(start ?? 0, (base + 41 * 60).rounded(.down), accuracy: 1.01, "gesprek niet op zijn echte begintijd")
+        }
+        let after = DayModel.shared.plan
+        XCTAssertFalse(after.proposals.contains { $0.match.isAssigned },
+                       "na Alles registreren nog klantvoorstellen: \(describe(after.proposals))")
+        XCTAssertTrue(after.proposals.contains { !$0.match.isAssigned }, "het werk zonder klant verdween")
+        XCTAssertEqual(after.registered.count, ready.count)
+        XCTAssertEqual(DayModel.shared.lastRegistration?.ids.count, ready.count, "alles ongedaan te maken")
+
+        // Eén registratie verwijderen: weg in Teamleader, de tijd komt terug als voorstel.
+        let janssen = try XCTUnwrap(after.registered.first { $0.companyId == "c-janssen" })
+        let deleteError = await DayModel.shared.deleteRegistration(janssen)
+        XCTAssertNil(deleteError)
+        XCTAssertFalse(DayModel.shared.plan.registered.contains { $0.id == janssen.id }, "nog in Teamleader na verwijderen")
+        XCTAssertTrue(DayModel.shared.plan.proposals.contains { $0.match.companyId == "c-janssen" },
+                      "verwijderde tijd niet opnieuw voorgesteld: \(describe(DayModel.shared.plan.proposals))")
+
+        // De rest ongedaan maken.
+        await DayModel.shared.undoLastRegistration()
+        XCTAssertTrue(DayModel.shared.plan.registered.isEmpty, "ongedaan maken liet registraties staan")
+        XCTAssertEqual(Set(DayModel.shared.plan.proposals.compactMap(\.match.companyId)), ["c-janssen", "c-peeters", "c-mm"])
+    }
+
     @MainActor func test4_MainWindowTabsAndPopoverSurviveRealLayout() throws {
         try requireBasics()
         let (lo, _) = Store.dayBounds(Date())

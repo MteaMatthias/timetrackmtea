@@ -102,6 +102,7 @@ struct MenuContent: View {
     let open: () -> Void
 
     @ObservedObject private var updater = Updater.shared
+    @State private var confirmingAll = false
     private var ready: [Proposal] { model.plan.proposals.map(model.proposalToRegister).filter { $0.match.isAssigned } }
 
     var body: some View {
@@ -158,6 +159,37 @@ struct MenuContent: View {
             } else if model.plan.worked >= 60 {
                 Label("Alles staat in Teamleader", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
             }
+            if confirmingAll {
+                // Eerst bevestigen: wat gaat er naar Teamleader?
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Alles registreren in Teamleader?").font(.headline)
+                    Text(RegisterAllSummary.text(ready)).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Annuleren") { confirmingAll = false }
+                            .keyboardShortcut(.cancelAction)
+                        Spacer()
+                        Button("Registreer \(ready.count) voorstellen") {
+                            confirmingAll = false
+                            let all = ready
+                            Task { await model.registerAll(all) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!model.canRegister)
+                    }
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.orange.opacity(0.12)))
+            }
+            if let last = model.lastRegistration {
+                HStack {
+                    Label("Geregistreerd: \(last.label)", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green).font(.caption).lineLimit(1)
+                    Spacer()
+                    Button("Ongedaan maken") { Task { await model.undoLastRegistration() } }
+                        .font(.caption).disabled(model.busy)
+                }
+            }
             if let error = model.error {
                 Text(error).font(.caption).foregroundStyle(.red).lineLimit(3)
             }
@@ -179,8 +211,8 @@ struct MenuContent: View {
                 } label: { Label("Open TimeTrack", systemImage: "macwindow") }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut("t")
-                if ready.count > 1 {
-                    Button("Alles registreren") { Task { await model.registerAll(ready) } }
+                if ready.count > 1 && !confirmingAll {
+                    Button("Alles registreren…") { confirmingAll = true }
                         .disabled(!model.canRegister)
                 }
                 Spacer()

@@ -16,7 +16,7 @@ final class DayModel: ObservableObject {
     private static var registering = false
     private var generation = 0
     /// De laatste registratie, om ze ongedaan te kunnen maken.
-    @Published private(set) var lastRegistration: (id: String, label: String, parts: [Proposal.Part])?
+    @Published private(set) var lastRegistration: (ids: [String], label: String)?
     /// False als de registraties uit Teamleader niet opgehaald konden worden: dan niets registreren.
     @Published private(set) var registeredLoaded = false
     @Published var error: String?
@@ -107,7 +107,7 @@ final class DayModel: ObservableObject {
             if let learn { Store.save(learn) }
             edits[p.id] = nil
             DayModel.shared.edits[p.id] = nil
-            lastRegistration = (id, "\(p.match.companyName) · \(formatDuration(p.seconds))", p.parts)
+            lastRegistration = ([id], "\(p.match.companyName) · \(formatDuration(p.seconds))")
             AppModel.shared.changed()
             await reload()
             return nil
@@ -128,6 +128,8 @@ final class DayModel: ObservableObject {
         busy = true
         defer { busy = false; Self.registering = false }
         var failures: [String] = []
+        var done: [String] = []
+        var total = 0.0
         var taken = takenIntervals
         for worked in proposals {
             var p = worked
@@ -138,29 +140,55 @@ final class DayModel: ObservableObject {
                                                              description: Self.text(for: p), invoiceable: p.match.invoiceable)
                 Store.savePushed(teamleaderId: id, parts: p.parts)
                 taken.append((start, start + p.seconds))
+                done.append(id)
+                total += p.seconds
                 edits[p.id] = nil
                 DayModel.shared.edits[p.id] = nil
             } catch {
                 failures.append("\(p.match.companyName): \(error.localizedDescription)")
             }
         }
-        lastRegistration = nil
+        // Alles in één keer ongedaan te maken (bv. per ongeluk op "Alles registreren" geklikt).
+        lastRegistration = done.isEmpty ? nil : (done, "\(done.count) registratie(s) · \(formatDuration(total))")
         AppModel.shared.changed()
         await reload()
         if !failures.isEmpty { error = "Niet gelukt: " + failures.joined(separator: "; ") }
     }
 
-    /// Verwijdert de laatste registratie weer uit Teamleader.
+    /// Verwijdert de laatste registratie(s) weer uit Teamleader.
     func undoLastRegistration() async {
         guard let last = lastRegistration else { return }
+        var failed: [String] = []
+        for id in last.ids {
+            do {
+                try await Teamleader.shared.deleteTime(id: id)
+                Store.deletePushed(teamleaderId: id)
+            } catch {
+                failed.append(id)
+                self.error = "Ongedaan maken mislukt: \(error.localizedDescription)"
+            }
+        }
+        lastRegistration = failed.isEmpty ? nil : (failed, "\(failed.count) registratie(s) niet verwijderd")
+        AppModel.shared.changed()
+        await reload()
+    }
+
+    /// Verwijdert een registratie uit Teamleader; de tijd verschijnt daarna opnieuw als voorstel.
+    func deleteRegistration(_ r: Registered) async -> String? {
         do {
-            try await Teamleader.shared.deleteTime(id: last.id)
-            Store.deletePushed(teamleaderId: last.id)
-            lastRegistration = nil
+            try await Teamleader.shared.deleteTime(id: r.id)
+            Store.deletePushed(teamleaderId: r.id)
+            if let last = lastRegistration, last.ids.contains(r.id) {
+                let rest = last.ids.filter { $0 != r.id }
+                lastRegistration = rest.isEmpty ? nil : (rest, "\(rest.count) registratie(s)")
+            }
             AppModel.shared.changed()
             await reload()
+            return nil
         } catch {
-            self.error = "Ongedaan maken mislukt: \(error.localizedDescription)"
+            let message = "Verwijderen mislukt: \(error.localizedDescription)"
+            self.error = message
+            return message
         }
     }
 
@@ -202,6 +230,8 @@ struct TodayView: View {
     @EnvironmentObject var teamleader: Teamleader
     @EnvironmentObject var appModel: AppModel
     @State private var showRegistered = false
+    @State private var confirmAll: [Proposal]?
+    @State private var deleting: Registered?
 
     private var plan: DayPlan { model.plan }
 
@@ -335,7 +365,7 @@ struct TodayView: View {
             Spacer()
             if ready.count > 1 {
                 Button {
-                    Task { await model.registerAll(ready) }
+                    confirmAll = ready
                 } label: {
                     Label("Alles registreren (\(formatDuration(ready.reduce(0) { $0 + Prefs.billed($1.seconds) })))",
                           systemImage: "checkmark.circle.fill")
@@ -343,6 +373,17 @@ struct TodayView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(!model.canRegister)
+                .confirmationDialog("Alles registreren in Teamleader?", isPresented: Binding(
+                    get: { confirmAll != nil }, set: { if !$0 { confirmAll = nil } }), titleVisibility: .visible) {
+                    Button("Registreer \(confirmAll?.count ?? 0) voorstellen") {
+                        let all = confirmAll ?? []
+                        confirmAll = nil
+                        Task { await model.registerAll(all) }
+                    }
+                    Button("Annuleren", role: .cancel) { confirmAll = nil }
+                } message: {
+                    Text(RegisterAllSummary.text(confirmAll ?? []))
+                }
             }
         }
         if plan.proposals.isEmpty {
@@ -401,6 +442,13 @@ struct TodayView: View {
                                     .foregroundStyle(.secondary).monospacedDigit()
                                 Text(formatDuration(r.duration)).fontWeight(.medium).monospacedDigit()
                                     .frame(width: 60, alignment: .trailing)
+                                Button {
+                                    deleting = r
+                                } label: { Image(systemName: "trash") }
+                                    .buttonStyle(.borderless)
+                                    .foregroundStyle(.red)
+                                    .disabled(!model.canRegister)
+                                    .help("Verwijder deze registratie uit Teamleader")
                             }
                             .padding(.vertical, 8)
                             Divider()
@@ -415,7 +463,30 @@ struct TodayView: View {
                 }
             }
             .card()
+            .confirmationDialog("Registratie verwijderen?", isPresented: Binding(
+                get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible,
+                presenting: deleting) { r in
+                Button("Verwijder uit Teamleader", role: .destructive) {
+                    deleting = nil
+                    Task { _ = await model.deleteRegistration(r) }
+                }
+                Button("Annuleren", role: .cancel) { deleting = nil }
+            } message: { r in
+                Text("\(r.companyName) · \(r.start.map { "\(formatTime($0))–\(formatTime($0 + r.duration))" } ?? "zonder tijdstip") · \(formatDuration(r.duration))\n\nDe registratie wordt ook in Teamleader verwijderd. De tijd verschijnt daarna opnieuw als voorstel.")
+            }
         }
+    }
+}
+
+/// Wat "Alles registreren" zal doen, om eerst te bevestigen.
+enum RegisterAllSummary {
+    static func text(_ proposals: [Proposal]) -> String {
+        let lines = proposals.prefix(8).map {
+            "• \($0.match.companyName) · \(formatDuration(Prefs.billed($0.seconds)))"
+        }
+        let more = proposals.count > 8 ? "\n… en nog \(proposals.count - 8)" : ""
+        let total = proposals.reduce(0) { $0 + Prefs.billed($1.seconds) }
+        return lines.joined(separator: "\n") + more + "\n\nTotaal \(formatDuration(total)). Controleer eerst of elke klant klopt."
     }
 }
 
