@@ -40,6 +40,8 @@ struct Proposal: Identifiable, Hashable {
     /// Te registreren duur (som van de blokken, afgerond; aanpasbaar op de kaart).
     var seconds: Double
     var bundled = false
+    /// Een gesprek (oproep of meeting): altijd een eigen registratie, hoe kort ook.
+    var isCall = false
     /// Wat er binnen de blokken gebeurde, per activiteit (voor "binnen een blok per deel toewijzen").
     var pieces: [Piece] = []
 
@@ -544,6 +546,7 @@ enum Planner {
                 learnPattern: top(info.learn, 1).first?.0 ?? "",
                 parts: parts, seconds: seconds,
                 bundled: !isCallGroup && (group.count > 1 || (bundle && !key.isEmpty)),
+                isCall: isCallGroup,
                 pieces: group.flatMap { r in
                     pieces(of: r).map {
                         Proposal.Piece(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60, label: $0.label)
@@ -571,7 +574,7 @@ enum Planner {
                 remaining -= take
             }
         }
-        proposals.removeAll { $0.duration < Double(minProposalMinutes * 60) }
+        proposals.removeAll { !$0.isCall && $0.duration < Double(minProposalMinutes * 60) }
 
         return DayPlan(worked: worked, proposals: proposals, registered: registered, activity: activity)
     }
