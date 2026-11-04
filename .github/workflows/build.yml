@@ -103,9 +103,11 @@ jobs:
             echo "::warning::MISLUKT $line"
           done
           cat test.log build.log 2>/dev/null | grep -E "(error|warning):|XCTAssert|Executed [0-9]+ test|Fatal" | grep -v "^warning: " \
-            | sed -E 's#/Users/runner/work/[^ ]*/Tests/#Tests/#' | sort -u | head -120 | while IFS= read -r line; do
-            echo "::warning::${line//$'\n'/ }"
-          done
+            | sed -E 's#/Users/runner/work/[^ ]*/Tests/#Tests/#' | sort -u | head -120 > failures.txt || true
+          # GitHub toont maar 10 meldingen per stap: alles in één melding, regel per regel.
+          if [ -s failures.txt ]; then
+            echo "::warning title=Details::$(sed 's/%/%25/g' failures.txt | awk '{printf "%s%%0A", $0}')"
+          fi
 
       - name: Download beschikbaar maken
         uses: actions/upload-artifact@v4

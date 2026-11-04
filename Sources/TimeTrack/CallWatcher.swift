@@ -417,6 +417,9 @@ final class CallPrompt {
             let hosting = NSHostingView(rootView: CallPromptView()
                 .environmentObject(CallWatcher.shared)
                 .environmentObject(Teamleader.shared))
+            // Het venster nooit naar de inhoud laten meegroeien: dat gaf een eindeloze lus van layout-rondes
+            // ("too many Update Constraints") en een vraag met een andere hoogte.
+            hosting.sizingOptions = []
             hosting.frame = NSRect(origin: .zero, size: Self.size)
             hosting.autoresizingMask = [.width, .height]
             p.contentView = hosting
