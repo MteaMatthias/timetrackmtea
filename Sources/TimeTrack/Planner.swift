@@ -301,7 +301,8 @@ enum Planner {
                     target = p.key
                 } else if r.key.isEmpty, r.length < absorbUnassignedMinutes {
                     target = [prev, next].compactMap { $0 }.filter { !$0.key.isEmpty }.max { $0.length < $1.length }?.key
-                } else if r.length < minProposalMinutes {
+                } else if r.length < minProposalMinutes, !(bundle && !r.key.isEmpty) {
+                    // Bij bundelen blijven korte blokken van een herkende klant behouden: ze tellen op.
                     target = [prev, next].compactMap { $0 }.max { $0.length < $1.length }?.key
                 }
                 if let target, target != r.key {
