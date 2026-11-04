@@ -479,7 +479,7 @@ final class Teamleader: ObservableObject {
         }
     }
 
-    private func storeTokens(_ json: [String: Any]) throws {
+    func storeTokens(_ json: [String: Any]) throws {
         guard let access = json["access_token"] as? String, let refresh = json["refresh_token"] as? String else {
             throw TLError.auth("geen tokens ontvangen")
         }

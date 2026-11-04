@@ -74,8 +74,23 @@ jobs:
           security find-identity -p codesigning "$KEYCHAIN"
           echo "::notice::Certificaat ingeladen: $(security find-identity -p codesigning "$KEYCHAIN" | grep -c 'MTEA TimeTrack') identiteit(en)"
 
+      - name: E2E – nep-Flow bouwen
+        run: ./E2E/build-fakeflow.sh
+
+      - name: E2E – Toegankelijkheid voor het testproces (enkel op de wegwerp-runner)
+        run: ./E2E/grant-accessibility.sh
+
       - name: Tests
-        run: TIMETRACK_DATA_DIR="$RUNNER_TEMP/tt-test" swift test 2>&1 | tee test.log; exit ${PIPESTATUS[0]}
+        timeout-minutes: 25
+        run: TIMETRACK_E2E=1 TIMETRACK_DATA_DIR="$RUNNER_TEMP/tt-test" swift test 2>&1 | tee test.log; exit ${PIPESTATUS[0]}
+
+      - name: E2E-diagnose tonen
+        if: always()
+        run: |
+          grep -E "E2E(-DIAG|-SKIP)?:" test.log | head -60 | while IFS= read -r line; do
+            echo "::notice::${line}"
+          done
+          grep -A30 "ONOPGEVANGEN NSException" test.log || true
 
       - name: App bouwen
         run: ./scripts/build-app.sh 2>&1 | tee build.log; exit ${PIPESTATUS[0]}
