@@ -25,6 +25,10 @@ final class CallWatcher: ObservableObject {
     @Published private(set) var current: CallRecord?
     @Published private(set) var suggestion: Match?
     @Published private(set) var suggestionReason = ""
+    /// Staat het nummer nog nergens in Teamleader (niet bij een bedrijf, niet bij een contact)?
+    @Published private(set) var numberUnknownInTeamleader = false
+    /// Het nummer toevoegen aan de fiche van de gekozen klant (vinkje in de vraag).
+    @Published var addNumberToCompany = true
 
     private var timer: Timer?
     private var activeKey: String?
@@ -91,6 +95,8 @@ final class CallWatcher: ObservableObject {
             if hit.0.isAssigned { guess = hit }
         }
         apply(guess, to: &record)
+        numberUnknownInTeamleader = d.kind == .phone && !(Phone.key(d.number).map(Store.companyHasPhone) ?? true)
+        addNumberToCompany = !UserDefaults.standard.bool(forKey: "addPhoneDisabled")
         record.id = Store.save(record)
         current = record
         CallPrompt.shared.show()
@@ -99,6 +105,7 @@ final class CallWatcher: ObservableObject {
         if guess == nil, d.kind == .phone, let found = await Teamleader.shared.companyForPhone(d.number),
            current?.id == record.id, !answered {
             var updated = record
+            numberUnknownInTeamleader = false
             apply((found, "contact in Teamleader"), to: &updated)
             Store.save(updated)
             current = updated
@@ -179,6 +186,25 @@ final class CallWatcher: ObservableObject {
     private func save(_ record: CallRecord, remember match: Match) {
         Store.save(record)
         Store.remember(record.memoryKey, match)
+        if record.kind == .phone, numberUnknownInTeamleader, addNumberToCompany, !match.skip,
+           let companyId = match.companyId {
+            UserDefaults.standard.set(false, forKey: "addPhoneDisabled")
+            let number = record.label, name = match.companyName
+            Task {
+                do {
+                    let added = try await Teamleader.shared.addPhone(number, toCompany: companyId)
+                    Reminder.shared.notify(title: added ? "Nummer toegevoegd" : "Nummer stond er al",
+                                           body: "\(number) staat op de fiche van \(name) in Teamleader.")
+                } catch {
+                    Reminder.shared.notify(title: "Nummer niet toegevoegd",
+                                           body: "\(number) kon niet aan \(name) toegevoegd worden: \(error.localizedDescription)")
+                }
+            }
+            numberUnknownInTeamleader = false
+        } else if record.kind == .phone, numberUnknownInTeamleader, !addNumberToCompany, !match.skip {
+            // Bewust uitgevinkt: de volgende keer standaard uit.
+            UserDefaults.standard.set(true, forKey: "addPhoneDisabled")
+        }
         answered = true
         current = record
         suggestion = match.skip ? nil : match
@@ -391,6 +417,7 @@ struct CallPromptView: View {
                     if !watcher.suggestionReason.isEmpty {
                         Text(watcher.suggestionReason).font(.caption).foregroundStyle(.secondary)
                     }
+                    addNumberToggle(suggestion.companyName, hasId: suggestion.companyId != nil)
                     HStack {
                         Button("Ja") { watcher.confirm() }
                             .buttonStyle(.borderedProminent)
@@ -404,6 +431,9 @@ struct CallPromptView: View {
                 } else {
                     Text(watcher.suggestion == nil ? "Voor welke klant is dit gesprek?" : "Kies de klant:")
                     CompanyField(id: $companyId, name: $companyName, compact: true)
+                    if !companyName.isEmpty {
+                        addNumberToggle(companyName, hasId: companyId != nil)
+                    }
                     HStack {
                         Button("Opslaan") {
                             watcher.choose(Match(companyId: companyId, companyName: companyName))
@@ -424,6 +454,15 @@ struct CallPromptView: View {
             choosing = false
             companyId = nil
             companyName = ""
+        }
+    }
+
+    @ViewBuilder
+    private func addNumberToggle(_ company: String, hasId: Bool) -> some View {
+        if watcher.numberUnknownInTeamleader, hasId, let call = watcher.current {
+            Toggle(isOn: $watcher.addNumberToCompany) {
+                Text("\(call.label) toevoegen aan de fiche van \(company) in Teamleader").font(.callout)
+            }
         }
     }
 }

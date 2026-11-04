@@ -375,4 +375,12 @@ final class PlannerTests: XCTestCase {
         Store.remember("tel:111111111", Match(skip: true))
         XCTAssertEqual(Store.callMemory("tel:111111111")?.skip, true)
     }
+
+    func testKnownCompanyPhoneIsDetectedAndCanBeAdded() {
+        XCTAssertFalse(Store.companyHasPhone("493295063"))
+        Store.addCompanyPhone(companyId: "c-janssen", key: "493295063")
+        XCTAssertTrue(Store.companyHasPhone("493295063"))
+        XCTAssertFalse(Store.companyHasPhone("93295063"))   // geen gedeeltelijke treffer
+        XCTAssertEqual(Matcher(excluded: []).match(phone: "0493 29 50 63")?.0.companyId, "c-janssen")
+    }
 }

@@ -178,6 +178,15 @@ enum Store {
         }
     }
 
+    /// Staat dit nummer (genormaliseerd) al bij een bedrijf in de lokale lijst?
+    static func companyHasPhone(_ key: String) -> Bool {
+        !Database.shared.query("SELECT id FROM companies WHERE (' ' || phones || ' ') LIKE ?", "% \(key) %").isEmpty
+    }
+
+    static func addCompanyPhone(companyId: String, key: String) {
+        Database.shared.run("UPDATE companies SET phones = trim(phones || ' ' || ?) WHERE id=?", key, companyId)
+    }
+
     // MARK: Oproepen en meetings
 
     static func calls(from lo: Double, to hi: Double) -> [CallRecord] {

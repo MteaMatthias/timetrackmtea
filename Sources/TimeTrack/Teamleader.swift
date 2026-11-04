@@ -318,6 +318,26 @@ final class Teamleader: ObservableObject {
         return nil
     }
 
+    /// Voegt een telefoonnummer toe aan de fiche van een bedrijf (de bestaande nummers blijven staan).
+    /// Geeft false terug als het nummer er al op stond.
+    func addPhone(_ number: String, toCompany companyId: String) async throws -> Bool {
+        guard let key = Phone.key(number) else { return false }
+        let info = try await call("companies.info", ["id": companyId])
+        let data = info["data"] as? [String: Any] ?? [:]
+        var telephones = (data["telephones"] as? [[String: Any]] ?? []).compactMap { t -> [String: String]? in
+            guard let n = t["number"] as? String else { return nil }
+            return ["type": t["type"] as? String ?? "phone", "number": n]
+        }
+        if telephones.contains(where: { Phone.key($0["number"] ?? "") == key }) {
+            Store.addCompanyPhone(companyId: companyId, key: key)
+            return false
+        }
+        telephones.append(["type": "phone", "number": number.trimmingCharacters(in: .whitespaces)])
+        _ = try await call("companies.update", ["id": companyId, "telephones": telephones])
+        Store.addCompanyPhone(companyId: companyId, key: key)
+        return true
+    }
+
     /// Tijdsregistraties van de aangemelde gebruiker die starten in [from, to).
     func registered(from: Double, to: Double) async throws -> [Registered] {
         let iso = ISO8601DateFormatter()
