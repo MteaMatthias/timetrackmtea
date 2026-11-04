@@ -128,3 +128,119 @@ struct CheckRow<Action: View>: View {
         .padding(.vertical, 6)
     }
 }
+
+// MARK: - Vormgeving
+
+extension View {
+    /// Afgeronde kaart met zachte rand en schaduw (de basis van elk scherm).
+    func card(padding: CGFloat = 16) -> some View {
+        self.padding(padding)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07)))
+            .shadow(color: .black.opacity(0.05), radius: 8, y: 2)
+    }
+}
+
+/// Ronde badge met initialen in de vaste kleur van de klant.
+struct Avatar: View {
+    let name: String
+    var size: CGFloat = 34
+
+    private var initials: String {
+        let words = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).prefix(2)
+        let letters = words.compactMap(\.first).map(String.init).joined()
+        return letters.isEmpty ? "?" : letters.uppercased()
+    }
+
+    var body: some View {
+        Circle()
+            .fill(name.isEmpty ? Color.orange.gradient : Color.forName(name).gradient)
+            .frame(width: size, height: size)
+            .overlay(Text(name.isEmpty ? "?" : initials)
+                .font(.system(size: size * 0.38, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white))
+    }
+}
+
+/// Grote tegel met een cijfer (Gewerkt, In Teamleader, Te registreren).
+struct MetricTile: View {
+    let icon: String
+    let title: String
+    let value: String
+    var tint: Color = .accentColor
+    var footnote: String?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 38, height: 38)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tint.opacity(0.14)))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.caption).foregroundStyle(.secondary)
+                Text(value).font(.system(size: 22, weight: .semibold, design: .rounded)).monospacedDigit()
+                if let footnote {
+                    Text(footnote).font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .card(padding: 14)
+    }
+}
+
+/// Klein label met een tijdsblok; klikbaar om het blok aan een andere klant toe te wijzen.
+struct BlockChip: View {
+    let part: Proposal.Part
+    var tint: Color = .secondary
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("\(formatTime(part.start))–\(formatTime(part.end))").monospacedDigit()
+            Text(formatDuration(part.end - part.start)).foregroundStyle(.secondary)
+        }
+        .font(.caption)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(tint.opacity(0.12)))
+        .overlay(Capsule().strokeBorder(tint.opacity(0.25)))
+        .contentShape(Capsule())
+    }
+}
+
+/// Popover om één blok aan een klant toe te wijzen of te negeren.
+struct BlockAssignView: View {
+    @EnvironmentObject var teamleader: Teamleader
+    let part: Proposal.Part
+    let current: String
+    let onDone: () -> Void
+    @State private var companyId: String?
+    @State private var companyName = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("\(formatTime(part.start)) – \(formatTime(part.end))").font(.headline).monospacedDigit()
+            Text(current.isEmpty ? "Nog niet toegewezen." : "Nu: \(current)").font(.callout).foregroundStyle(.secondary)
+            CompanyField(id: $companyId, name: $companyName, compact: true)
+            HStack {
+                Button("Toewijzen") {
+                    Store.assign(start: part.start, end: part.end, to: Match(companyId: companyId, companyName: companyName))
+                    onDone()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(companyName.isEmpty)
+                Spacer()
+                Button("Geen werk") {
+                    Store.dismiss(start: part.start, end: part.end)
+                    onDone()
+                }
+                .help("Dit blok niet registreren")
+            }
+        }
+        .padding(16)
+        .frame(width: 320)
+    }
+}

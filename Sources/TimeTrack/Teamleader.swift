@@ -215,6 +215,7 @@ final class Teamleader: ObservableObject {
             let name = "\(d["first_name"] as? String ?? "") \(d["last_name"] as? String ?? "")"
                 .trimmingCharacters(in: .whitespaces)
             userName = name.isEmpty ? (d["email"] as? String ?? "Teamleader") : name
+            UserDefaults.standard.set([d["first_name"] as? String ?? "", name].filter { !$0.isEmpty }, forKey: "tlOwnNames")
             userId = d["id"] as? String
             UserDefaults.standard.set(userName, forKey: "tlUserName")
             if let email = d["email"] as? String, let domain = email.split(separator: "@").last {

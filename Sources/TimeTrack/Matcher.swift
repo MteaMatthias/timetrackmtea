@@ -112,16 +112,21 @@ final class Matcher {
 
     init(rules: [Rule] = Store.rules(), companies: [Company] = Store.companies(),
          ownDomain: String? = UserDefaults.standard.string(forKey: "tlOwnDomain"),
-         excluded: Set<String> = Matcher.excludedCompanies, defaultInvoiceable: Bool = true) {
+         excluded: Set<String> = Matcher.excludedCompanies, defaultInvoiceable: Bool = true,
+         ownNames: [String] = Matcher.ownNames) {
         self.defaultInvoiceable = defaultInvoiceable
+        let ownNormalized = Set(ownNames.map { Self.normalize($0, stripLegalForms: true) }.filter { !$0.isEmpty })
         self.rules = rules.map { rule in
             (rule, rule.pattern.split(separator: "|")
                 .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
                 .filter { !$0.isEmpty })
         }
         // Eigen bedrijf en uitgesloten bedrijven (leveranciers) nooit als klant herkennen.
+        // Ook een "bedrijf" met je eigen naam (voor- of volledige naam) nooit: die staat in venstertitels
+        // (bv. de profielnaam van Chrome) en zou alles aan dat bedrijf koppelen.
         let candidates = companies.filter { c in
             !excluded.contains(c.id) && !(ownDomain.map { c.domains.contains($0) } ?? false)
+                && !ownNormalized.contains(Self.normalize(c.name, stripLegalForms: true))
         }
         var owners: [String: [Company]] = [:]
         var names: [(name: String, company: Company)] = []
@@ -165,7 +170,31 @@ final class Matcher {
         return result
     }
 
-    private func compute(app: String, title: String, host: String) -> (Match, String) {
+    /// Je eigen voor- en volledige naam (uit Teamleader) en de naam van deze Mac-gebruiker.
+    static var ownNames: [String] {
+        var names = UserDefaults.standard.stringArray(forKey: "tlOwnNames") ?? []
+        let full = NSFullUserName()
+        names.append(full)
+        if let first = full.split(separator: " ").first { names.append(String(first)) }
+        return names
+    }
+
+    /// Haalt de browsernaam en wat erna komt (profielnaam) van een venstertitel:
+    /// "TPC Cloud - Google Chrome - Matthias" → "TPC Cloud".
+    static func cleanTitle(_ title: String) -> String {
+        let browsers = ["Google Chrome", "Microsoft Edge", "Microsoft\u{200B} Edge", "Brave", "Vivaldi", "Opera", "Arc",
+                        "Safari", "Firefox", "Mozilla Firefox", "Chromium"]
+        var t = title
+        for b in browsers {
+            for sep in [" - ", " — ", " – "] {
+                if let r = t.range(of: sep + b) { t = String(t[..<r.lowerBound]) }
+            }
+        }
+        return t.trimmingCharacters(in: .whitespaces)
+    }
+
+    private func compute(app: String, title rawTitle: String, host: String) -> (Match, String) {
+        let title = Self.cleanTitle(rawTitle)
         let a = app.lowercased(), t = title.lowercased(), h = host.lowercased()
         for item in rules {
             let text: String

@@ -114,7 +114,7 @@ enum Planner {
 
     /// "Offerte Janssen - Claude" → "Offerte Janssen"; een titel die enkel de naam van de assistent is, telt niet.
     static func chatTitle(_ title: String, app: String) -> String {
-        var t = title
+        var t = Matcher.cleanTitle(title)
         for suffix in [" - Claude", " – Claude", " | Claude", " - ChatGPT", " | ChatGPT", " - Gemini", " - Perplexity",
                        " - Google Chrome", " — Google Chrome", " - Safari", " - Microsoft Edge"] where t.hasSuffix(suffix) {
             t = String(t.dropLast(suffix.count))
@@ -130,15 +130,18 @@ enum Planner {
     ///   - dismissed: genegeerde periodes (nil = uit de database).
     ///   - bundle: per klant één voorstel voor de hele dag (in plaats van één per blok).
     ///   - calls: oproepen en meetings (nil = uit de database).
+    ///   - assignments: blokken die de gebruiker zelf aan een klant toewees (nil = uit de database).
     static func plan(day: Date, registered: [Registered], matcher: Matcher = Matcher(), roundTo: Int = 5,
                      events: [CalendarEvent]? = nil, dismissed: [(Double, Double)]? = nil,
-                     bundle: Bool = false, calls: [CallRecord]? = nil) -> DayPlan {
+                     bundle: Bool = false, calls: [CallRecord]? = nil,
+                     assignments: [Store.Assignment]? = nil) -> DayPlan {
         let (lo, hi) = Store.dayBounds(day)
         let n = max(1, Int(((hi - lo) / 60).rounded()))
         var minutes = [[String: Info]](repeating: [:], count: n)
         var forced = [String?](repeating: nil, count: n)
         var skippedSeconds = [Double](repeating: 0, count: n)
         var assistantSeconds = [Double](repeating: 0, count: n)
+        var pinned = [Bool](repeating: false, count: n)   // door de gebruiker toegewezen: niet gladstrijken
         var matches: [String: Match] = [:]
         var activity: [TimelineBlock] = []
 
@@ -255,6 +258,30 @@ enum Planner {
             }
         }
 
+        // 2c. Zelf toegewezen blokken gaan voor alles: al het werk in die minuten hoort bij die klant.
+        for a in assignments ?? Store.assignments(from: lo, to: hi) {
+            let m = a.match
+            matches[m.key] = m
+            let first = index(a.start)
+            let last = min(n, Int(((a.end - lo) / 60).rounded(.up)))
+            guard first < last else { continue }
+            for i in first..<last {
+                var merged = Info()
+                for (_, info) in minutes[i] {
+                    merged.seconds += info.seconds
+                    info.activities.forEach { merged.activities[$0.key, default: 0] += $0.value }
+                    info.learn.forEach { merged.learn[$0.key, default: 0] += $0.value }
+                    info.descriptions.forEach { merged.descriptions[$0.key, default: 0] += $0.value }
+                }
+                guard merged.seconds > 0 || forced[i] != nil else { continue }
+                merged.seconds = max(merged.seconds, forced[i] != nil ? 60 : 0)
+                merged.reasons["door jou toegewezen"] = max(merged.seconds, 1)
+                minutes[i] = [m.key: merged]
+                pinned[i] = true
+                if forced[i] != nil { forced[i] = m.key }
+            }
+        }
+
         // 3. Per minuut: gewerkt? en voor wie?
         var keyAt = [String?](repeating: nil, count: n)
         var worked = 0.0
@@ -332,7 +359,7 @@ enum Planner {
                     // Bij bundelen blijven korte blokken van een herkende klant behouden: ze tellen op.
                     target = [prev, next].compactMap { $0 }.max { $0.length < $1.length }?.key
                 }
-                if let target, target != r.key {
+                if let target, target != r.key, !pinned[r.from] {
                     for x in r.from..<r.to { keyAt[x] = target }
                     changed = true
                 }

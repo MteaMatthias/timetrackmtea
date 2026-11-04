@@ -126,8 +126,13 @@ struct OnboardingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Welkom bij TimeTrack").font(.largeTitle.weight(.bold))
-            Text("TimeTrack houdt bij waar je aan werkt en stelt elke dag voor wat je in Teamleader kan registreren. Je bevestigt met één klik. Alles blijft op je Mac; enkel wat je bevestigt gaat naar Teamleader.")
+            Text("TimeTrack houdt bij waar je aan werkt en stelt elke dag voor wat je in Teamleader kan registreren. Je bevestigt met één klik.")
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Label("Privé: wat je doet (programma's, websites, oproepen) en je voorstellen blijven enkel op deze Mac. Niemand anders ziet ze: geen collega's, geen beheerder, ook niet tools.mtea.be. Pas wanneer jij een voorstel registreert, komt die registratie op jouw naam in Teamleader. Daar zijn ze zichtbaar volgens de rechten in Teamleader (zoals elke tijdsregistratie die je zelf invult).", systemImage: "lock.fill")
+                .font(.callout)
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.green.opacity(0.1)))
                 .fixedSize(horizontal: false, vertical: true)
             SetupChecklist()
             HStack {
@@ -260,7 +265,7 @@ struct SettingsView: View {
                     Text(Database.directory.path).textSelection(.enabled).font(.caption)
                 }
                 Button("Toon in Finder") { NSWorkspace.shared.open(Database.directory) }
-                Text("Activiteit, vensters en websites blijven op deze Mac. Enkel wat je zelf registreert gaat naar Teamleader.")
+                Label("Privé: wat je doet (programma's, websites, oproepen) en je voorstellen blijven enkel op deze Mac. Niemand anders ziet ze: geen collega's, geen beheerder, ook niet tools.mtea.be. Pas wanneer jij een voorstel registreert, komt die registratie op jouw naam in Teamleader. Daar zijn ze zichtbaar volgens de rechten in Teamleader (zoals elke tijdsregistratie die je zelf invult).", systemImage: "lock.fill")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

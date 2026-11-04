@@ -126,6 +126,17 @@ final class Database {
                 skip INTEGER NOT NULL DEFAULT 0
             );
             """,
+            // 4: blokken die de gebruiker zelf aan een klant toewees
+            """
+            CREATE TABLE IF NOT EXISTS assignments (
+                id INTEGER PRIMARY KEY,
+                start REAL NOT NULL,
+                end REAL NOT NULL,
+                company_id TEXT,
+                company_name TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS assignments_end ON assignments(end);
+            """,
         ]
         let current = Int(query("PRAGMA user_version").first?.int("user_version") ?? 0)
         for (i, sql) in migrations.enumerated() where i >= current {

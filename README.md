@@ -120,6 +120,9 @@ swift test
 
 ## Privacy
 
+**Je activiteit is enkel voor jezelf.** Wat je doet (programma's, websites, oproepen) en je voorstellen blijven op je eigen Mac. Collega's, beheerders en tools.mtea.be zien ze niet. Pas wanneer jij een voorstel registreert, komt die registratie op jouw naam in Teamleader. Daar is ze zichtbaar volgens de rechten in Teamleader, net als elke tijdsregistratie die je zelf invult.
+
+
 - Activiteit, vensters en domeinen blijven op de Mac, in `~/Library/Application Support/TimeTrack/`.
 - Er gaat niets naar tools.mtea.be, behalve het aanmelden.
 - Naar Teamleader gaat alleen wat de gebruiker zelf bevestigt.

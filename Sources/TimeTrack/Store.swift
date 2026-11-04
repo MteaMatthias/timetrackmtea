@@ -236,6 +236,30 @@ enum Store {
                             key, match.companyId, match.companyName, match.skip)
     }
 
+    // MARK: Zelf toegewezen blokken
+
+    struct Assignment {
+        let start: Double
+        let end: Double
+        let match: Match
+    }
+
+    static func assignments(from lo: Double, to hi: Double) -> [Assignment] {
+        Database.shared.query("SELECT * FROM assignments WHERE end > ? AND start < ? ORDER BY id", lo, hi).map {
+            Assignment(start: $0.double("start"), end: $0.double("end"),
+                       match: Match(companyId: $0.optionalString("company_id"), companyName: $0.string("company_name")))
+        }
+    }
+
+    /// Wijst een blok toe aan een klant; een eerdere toewijzing van (een deel van) dit blok vervalt.
+    static func assign(start: Double, end: Double, to match: Match) {
+        Database.shared.transaction {
+            Database.shared.run("DELETE FROM assignments WHERE start >= ? AND end <= ?", start, end)
+            Database.shared.run("INSERT INTO assignments(start, end, company_id, company_name) VALUES (?,?,?,?)",
+                                start, end, match.companyId, match.companyName)
+        }
+    }
+
     // MARK: Geregistreerde blokken
 
     static func savePushed(teamleaderId: String, parts: [Proposal.Part]) {

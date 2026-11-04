@@ -1,18 +1,24 @@
 import SwiftUI
 
-/// Houdt het dagplan bij (activiteit + registraties uit Teamleader + voorstellen).
+/// Houdt het dagplan bij (activiteit + registraties uit Teamleader + voorstellen) en registreert.
 @MainActor
 final class DayModel: ObservableObject {
+    /// Het hoofdvenster (de gekozen dag).
     static let shared = DayModel()
+    /// Het menubalk-paneel (altijd vandaag).
+    static let menu = DayModel()
 
     @Published var day = Date()
     @Published private(set) var plan = DayPlan()
     @Published private(set) var loading = false
+    @Published private(set) var busy = false
     /// False als de registraties uit Teamleader niet opgehaald konden worden: dan niets registreren.
     @Published private(set) var registeredLoaded = false
     @Published var error: String?
-    /// Aanpassingen op kaartjes (klant, omschrijving, tijden…), per voorstel-id; overleven het herladen.
+    /// Aanpassingen op kaartjes (klant, omschrijving, duur…), per voorstel-id; overleven het herladen.
     @Published var edits: [String: Proposal] = [:]
+
+    var canRegister: Bool { Teamleader.shared.isConnected && registeredLoaded && !busy }
 
     var dismissedCount: Int {
         let (lo, hi) = Store.dayBounds(day)
@@ -37,11 +43,54 @@ final class DayModel: ObservableObject {
                 self.error = error.localizedDescription
             }
         }
-        let matcher = Matcher.current()
-        plan = Planner.plan(day: day, registered: registered, matcher: matcher, roundTo: Prefs.roundTo,
+        plan = Planner.plan(day: day, registered: registered, matcher: Matcher.current(), roundTo: Prefs.roundTo,
                             bundle: Prefs.bundlePerClient)
         let ids = Set(plan.proposals.map(\.id))
         edits = edits.filter { ids.contains($0.key) }
+    }
+
+    /// Maakt de registratie in Teamleader; geeft een foutmelding terug of nil.
+    func register(_ p: Proposal, learn: Rule? = nil) async -> String? {
+        busy = true
+        defer { busy = false }
+        do {
+            let id = try await Teamleader.shared.addTime(start: p.start, end: p.start + p.seconds, match: p.match,
+                                                         description: p.description, invoiceable: p.match.invoiceable)
+            Store.savePushed(teamleaderId: id, parts: p.parts)
+            if let learn { Store.save(learn) }
+            edits[p.id] = nil
+            AppModel.shared.changed()
+            await reload()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func registerAll(_ proposals: [Proposal]) async {
+        busy = true
+        defer { busy = false }
+        var failures: [String] = []
+        for p in proposals {
+            do {
+                let id = try await Teamleader.shared.addTime(start: p.start, end: p.start + p.seconds, match: p.match,
+                                                             description: p.description, invoiceable: p.match.invoiceable)
+                Store.savePushed(teamleaderId: id, parts: p.parts)
+                edits[p.id] = nil
+            } catch {
+                failures.append("\(p.match.companyName): \(error.localizedDescription)")
+            }
+        }
+        AppModel.shared.changed()
+        await reload()
+        if !failures.isEmpty { error = "Niet gelukt: " + failures.joined(separator: "; ") }
+    }
+
+    func dismiss(_ p: Proposal) {
+        // Enkel de echte blokken negeren (bij een gebundeld voorstel zit er ander werk tussen).
+        p.parts.forEach { Store.dismiss(start: $0.start, end: $0.end) }
+        edits[p.id] = nil
+        AppModel.shared.changed()
     }
 }
 
@@ -55,35 +104,33 @@ enum Prefs {
     }
 }
 
+// MARK: - Vandaag
+
 struct TodayView: View {
     @EnvironmentObject var model: DayModel
     @EnvironmentObject var teamleader: Teamleader
     @EnvironmentObject var appModel: AppModel
-    @State private var busy = false
     @State private var showRegistered = false
 
-    private var canRegister: Bool { teamleader.isConnected && model.registeredLoaded && !busy }
+    private var plan: DayPlan { model.plan }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 20) {
                 header
-                if let error = model.error {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .textSelection(.enabled)
-                }
-                if !teamleader.isConnected {
-                    Label("Verbind met Teamleader (Instellingen) om je registraties te zien en voorstellen te bevestigen.",
-                          systemImage: "link")
-                        .foregroundStyle(.orange)
-                }
-                timelineCard
+                metrics
+                banners
+                DayTimeline(plan: plan, day: model.day) { AppModel.shared.changed() }
+                    .frame(height: 150)
+                    .card()
                 proposalsSection
                 registeredSection
             }
-            .padding(20)
+            .padding(24)
+            .frame(maxWidth: 1100, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .task(id: model.day) {
             model.edits = [:]
             await model.reload()
@@ -91,32 +138,40 @@ struct TodayView: View {
         .onChange(of: appModel.revision) { _ in Task { await model.reload() } }
         .onReceive(Timer.publish(every: 120, on: .main, in: .common).autoconnect()) { _ in
             // Niet herladen terwijl iemand een voorstel aan het aanpassen is.
-            if Calendar.current.isDateInToday(model.day), !busy, model.edits.isEmpty { Task { await model.reload() } }
+            if Calendar.current.isDateInToday(model.day), !model.busy, model.edits.isEmpty {
+                Task { await model.reload() }
+            }
         }
     }
 
     // MARK: Kop
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 18) {
-            HStack(spacing: 6) {
-                Button { shift(-1) } label: { Image(systemName: "chevron.left") }
-                DatePicker("Dag", selection: $model.day, displayedComponents: .date)
-                    .labelsHidden()
-                    .frame(width: 120)
-                Button { shift(1) } label: { Image(systemName: "chevron.right") }
-                Button("Vandaag") { model.day = Date() }
-                    .disabled(Calendar.current.isDateInToday(model.day))
+        HStack(alignment: .firstTextBaseline, spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(Calendar.current.isDateInToday(model.day) ? "Vandaag" : model.day.formatted(.dateTime.weekday(.wide)).capitalized)
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                Text(model.day.formatted(.dateTime.weekday(.wide).day().month(.wide).year()))
+                    .foregroundStyle(.secondary)
             }
             Spacer()
-            Stat(label: "Gewerkt", value: formatDuration(model.plan.worked))
-            Stat(label: "In Teamleader", value: formatDuration(model.plan.registeredSeconds), color: .green)
-            Stat(label: "Nog te registreren", value: formatDuration(model.plan.proposedSeconds),
-                 color: model.plan.proposals.isEmpty ? .secondary : .orange)
-            Button { Task { await model.reload() } } label: {
-                if model.loading { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.clockwise") }
+            HStack(spacing: 4) {
+                Button { shift(-1) } label: { Image(systemName: "chevron.left") }
+                    .help("Vorige dag")
+                Button("Vandaag") { model.day = Date() }
+                    .disabled(Calendar.current.isDateInToday(model.day))
+                Button { shift(1) } label: { Image(systemName: "chevron.right") }
+                    .help("Volgende dag")
+                DatePicker("Dag", selection: $model.day, displayedComponents: .date)
+                    .labelsHidden()
+                    .datePickerStyle(.field)
+                    .frame(width: 110)
+                Button { Task { await model.reload() } } label: {
+                    if model.loading { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.clockwise") }
+                }
+                .help("Vernieuwen")
             }
-            .help("Vernieuwen")
+            .controlSize(.large)
         }
     }
 
@@ -124,13 +179,48 @@ struct TodayView: View {
         model.day = Calendar.current.date(byAdding: .day, value: days, to: model.day) ?? model.day
     }
 
-    // MARK: Tijdlijn
+    private var metrics: some View {
+        let worked = max(plan.worked, 1)
+        return VStack(spacing: 10) {
+            HStack(spacing: 14) {
+                MetricTile(icon: "laptopcomputer", title: "Gewerkt", value: formatDuration(plan.worked), tint: .blue)
+                MetricTile(icon: "checkmark.circle.fill", title: "In Teamleader",
+                           value: formatDuration(plan.registeredSeconds), tint: .green)
+                MetricTile(icon: "tray.full.fill", title: "Te registreren",
+                           value: formatDuration(plan.proposedSeconds),
+                           tint: plan.proposals.isEmpty ? .secondary : .orange)
+            }
+            GeometryReader { geo in
+                let done = min(1, plan.registeredSeconds / worked)
+                let open = min(1 - done, plan.proposedSeconds / worked)
+                HStack(spacing: 2) {
+                    Capsule().fill(Color.green.gradient).frame(width: max(0, geo.size.width * done))
+                    Capsule().fill(Color.orange.opacity(0.6)).frame(width: max(0, geo.size.width * open))
+                    Spacer(minLength: 0)
+                }
+            }
+            .frame(height: 6)
+            .background(Capsule().fill(Color.primary.opacity(0.06)))
+            .help("Groen: in Teamleader · oranje: nog te registreren")
+        }
+    }
 
-    private var timelineCard: some View {
-        GroupBox {
-            DayTimeline(plan: model.plan, day: model.day)
-                .frame(height: 132)
-                .padding(.vertical, 4)
+    @ViewBuilder
+    private var banners: some View {
+        if let error = model.error {
+            Banner(icon: "exclamationmark.triangle.fill", tint: .orange, text: error)
+        }
+        if !teamleader.isConnected {
+            Banner(icon: "link", tint: .blue,
+                   text: "Verbind met Teamleader (Instellingen) om je registraties te zien en voorstellen te bevestigen.") {
+                Button("Instellingen") { appModel.tab = 3 }
+            }
+        }
+        if let limit = teamleader.historicLimitHours,
+           let oldest = plan.proposals.map(\.start).min(),
+           Date().timeIntervalSince1970 - oldest > limit * 3600 {
+            Banner(icon: "clock.badge.exclamationmark", tint: .orange,
+                   text: "Teamleader aanvaardt geen registraties die meer dan \(Int(limit)) uur teruggaan.")
         }
     }
 
@@ -138,118 +228,123 @@ struct TodayView: View {
 
     @ViewBuilder
     private var proposalsSection: some View {
-        let ready = model.plan.proposals.map(model.proposalToRegister).filter { $0.match.isAssigned }
-        HStack {
+        let ready = plan.proposals.map(model.proposalToRegister).filter { $0.match.isAssigned }
+        HStack(alignment: .firstTextBaseline) {
             Text("Voorstellen").font(.title2.weight(.semibold))
+            if !plan.proposals.isEmpty {
+                Text("\(plan.proposals.count)").font(.callout.weight(.semibold))
+                    .padding(.horizontal, 8).padding(.vertical, 2)
+                    .background(Capsule().fill(Color.orange.opacity(0.18)))
+            }
             Spacer()
             if ready.count > 1 {
-                Button("Registreer alle \(ready.count) met klant (\(formatDuration(ready.reduce(0) { $0 + $1.duration })))") {
-                    Task { await registerAll(ready) }
+                Button {
+                    Task { await model.registerAll(ready) }
+                } label: {
+                    Label("Alles registreren (\(formatDuration(ready.reduce(0) { $0 + $1.seconds })))",
+                          systemImage: "checkmark.circle.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!canRegister)
+                .controlSize(.large)
+                .disabled(!model.canRegister)
             }
         }
-        if model.plan.proposals.isEmpty {
-            Text(model.plan.worked < 60
-                 ? "Nog geen activiteit op deze dag."
-                 : "Alles staat in Teamleader. 🎉")
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 8)
+        if plan.proposals.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: plan.worked < 60 ? "sun.max" : "checkmark.seal.fill")
+                    .font(.system(size: 34))
+                    .foregroundStyle(plan.worked < 60 ? Color.secondary : Color.green)
+                Text(plan.worked < 60 ? "Nog geen activiteit op deze dag." : "Alles staat in Teamleader.")
+                    .font(.headline)
+                Text(plan.worked < 60 ? "TimeTrack houdt bij waar je aan werkt; voorstellen verschijnen hier vanzelf."
+                                      : "Mooi zo, er valt niets meer te registreren.")
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 28)
+            .card()
         } else {
-            ForEach(model.plan.proposals) { proposal in
-                ProposalCard(proposal: proposal, canRegister: canRegister) { edited, learn in
-                    await register(edited, learn: learn)
-                } onDismiss: {
-                    // Enkel de echte blokken negeren (bij een gebundeld voorstel zit er ander werk tussen).
-                    proposal.parts.forEach { Store.dismiss(start: $0.start, end: $0.end) }
-                    model.edits[proposal.id] = nil
-                    Task { await model.reload() }
-                }
+            ForEach(plan.proposals) { proposal in
+                ProposalCard(proposal: proposal, model: model)
             }
         }
         if model.dismissedCount > 0 {
             HStack {
-                Text("\(model.dismissedCount) genegeerd voorstel(len) op deze dag.").foregroundStyle(.secondary)
+                Image(systemName: "eye.slash").foregroundStyle(.secondary)
+                Text("\(model.dismissedCount) genegeerd blok(ken) op deze dag.").foregroundStyle(.secondary)
                 Button("Terugzetten") {
                     let (lo, hi) = Store.dayBounds(model.day)
                     Store.undismiss(from: lo, to: hi)
-                    Task { await model.reload() }
+                    appModel.changed()
                 }
                 .buttonStyle(.link)
             }
             .font(.callout)
         }
-        if let limit = teamleader.historicLimitHours,
-           let oldest = model.plan.proposals.map(\.start).min(),
-           Date().timeIntervalSince1970 - oldest > limit * 3600 {
-            Label("Teamleader aanvaardt geen registraties die meer dan \(Int(limit)) uur teruggaan.",
-                  systemImage: "clock.badge.exclamationmark")
-                .foregroundStyle(.orange)
-        }
-    }
-
-    private func register(_ p: Proposal, learn: Rule?) async -> String? {
-        busy = true
-        defer { busy = false }
-        do {
-            let id = try await teamleader.addTime(start: p.start, end: p.start + p.seconds, match: p.match,
-                                                  description: p.description, invoiceable: p.match.invoiceable)
-            Store.savePushed(teamleaderId: id, parts: p.parts)
-            if let learn { Store.save(learn) }
-            model.edits[p.id] = nil
-            await model.reload()
-            return nil
-        } catch {
-            return error.localizedDescription
-        }
-    }
-
-    private func registerAll(_ proposals: [Proposal]) async {
-        busy = true
-        defer { busy = false }
-        var failed = 0
-        for p in proposals {
-            do {
-                let id = try await teamleader.addTime(start: p.start, end: p.start + p.seconds, match: p.match,
-                                                      description: p.description, invoiceable: p.match.invoiceable)
-                Store.savePushed(teamleaderId: id, parts: p.parts)
-                model.edits[p.id] = nil
-            } catch {
-                failed += 1
-                model.error = error.localizedDescription
-            }
-        }
-        await model.reload()
-        if failed > 0 { model.error = "\(failed) registratie(s) mislukt: \(model.error ?? "")" }
     }
 
     // MARK: Al in Teamleader
 
     @ViewBuilder
     private var registeredSection: some View {
-        if !model.plan.registered.isEmpty {
-            DisclosureGroup(isExpanded: $showRegistered) {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(model.plan.registered.sorted { ($0.start ?? 0) < ($1.start ?? 0) }) { r in
-                        HStack(spacing: 10) {
-                            Text(r.start.map { "\(formatTime($0))–\(formatTime($0 + r.duration))" } ?? "zonder tijdstip")
-                                .monospacedDigit()
-                                .frame(width: 110, alignment: .leading)
-                            RoundedRectangle(cornerRadius: 3).fill(Color.forName(r.companyName)).frame(width: 10, height: 10)
-                            Text(r.companyName).fontWeight(.medium)
-                            Text(r.description).foregroundStyle(.secondary).lineLimit(1)
-                            Spacer()
-                            Text(formatDuration(r.duration)).monospacedDigit()
+        if !plan.registered.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                DisclosureGroup(isExpanded: $showRegistered) {
+                    VStack(spacing: 0) {
+                        ForEach(plan.registered.sorted { ($0.start ?? 0) < ($1.start ?? 0) }) { r in
+                            HStack(spacing: 12) {
+                                Avatar(name: r.companyName, size: 26)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(r.companyName).fontWeight(.medium)
+                                    if !r.description.isEmpty {
+                                        Text(r.description).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                }
+                                Spacer()
+                                Text(r.start.map { "\(formatTime($0))–\(formatTime($0 + r.duration))" } ?? "zonder tijdstip")
+                                    .foregroundStyle(.secondary).monospacedDigit()
+                                Text(formatDuration(r.duration)).fontWeight(.medium).monospacedDigit()
+                                    .frame(width: 60, alignment: .trailing)
+                            }
+                            .padding(.vertical, 8)
+                            Divider()
                         }
                     }
+                    .padding(.top, 8)
+                } label: {
+                    Label("Al in Teamleader · \(plan.registered.count) registratie(s) · \(formatDuration(plan.registeredSeconds))",
+                          systemImage: "checkmark.circle.fill")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
                 }
-                .padding(.top, 6)
-            } label: {
-                Text("Al in Teamleader (\(model.plan.registered.count) · \(formatDuration(model.plan.registeredSeconds)))")
-                    .font(.headline)
             }
+            .card()
         }
+    }
+}
+
+/// Melding bovenaan een scherm.
+struct Banner<Action: View>: View {
+    let icon: String
+    let tint: Color
+    let text: String
+    @ViewBuilder var action: () -> Action
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).foregroundStyle(tint)
+            Text(text).textSelection(.enabled)
+            Spacer()
+            action()
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tint.opacity(0.1)))
+    }
+}
+
+extension Banner where Action == EmptyView {
+    init(icon: String, tint: Color, text: String) {
+        self.init(icon: icon, tint: tint, text: text) { EmptyView() }
     }
 }
 
@@ -258,27 +353,25 @@ struct TodayView: View {
 struct ProposalCard: View {
     @EnvironmentObject var teamleader: Teamleader
     let original: Proposal
-    let canRegister: Bool
-    let onRegister: (Proposal, Rule?) async -> String?
-    let onDismiss: () -> Void
+    @ObservedObject var model: DayModel
 
     @State private var proposal: Proposal
     @State private var remember = false
     @State private var working = false
     @State private var error: String?
     @State private var showDetails = false
+    @State private var assigning: Proposal.Part?
 
-    init(proposal: Proposal, canRegister: Bool,
-         onRegister: @escaping (Proposal, Rule?) async -> String?, onDismiss: @escaping () -> Void) {
+    init(proposal: Proposal, model: DayModel) {
         original = proposal
-        self.canRegister = canRegister
-        self.onRegister = onRegister
-        self.onDismiss = onDismiss
-        _proposal = State(initialValue: DayModel.shared.edits[proposal.id] ?? proposal)
+        self.model = model
+        _proposal = State(initialValue: model.edits[proposal.id] ?? proposal)
     }
 
     private var clientChanged: Bool { proposal.match.key != original.match.key }
-    /// Enkel een klantspecifiek domein, programma of afspraaktitel is een goede kandidaat om te onthouden;
+    private var tint: Color { proposal.match.isAssigned ? Color.forName(proposal.match.companyName) : .orange }
+
+    /// Enkel een klantspecifiek domein, programma of chattitel is een goede kandidaat om te onthouden;
     /// nooit een browser, mailprogramma of algemene site (Gmail, Google Docs, Canva…).
     private var learnable: Bool {
         let p = original.learnPattern
@@ -289,110 +382,130 @@ struct ProposalCard: View {
         "Safari", "Google Chrome", "Microsoft Edge", "Brave Browser", "Arc", "Firefox", "Finder", "Mail",
         "Microsoft Outlook", "Slack", "Microsoft Teams", "zoom.us", "Notes", "Notities", "Terminal",
         "Microsoft Word", "Microsoft Excel", "Microsoft PowerPoint", "Preview", "Voorvertoning", "TimeTrack",
+        "Claude", "ChatGPT", "Flow",
     ]
 
     var body: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(formatDuration(proposal.seconds))
-                            .font(.title3.weight(.semibold)).monospacedDigit()
-                        if proposal.parts.count > 1 {
-                            Text("in \(proposal.parts.count) blokken").foregroundStyle(.secondary)
-                                .help(partsText)
-                        } else {
-                            Text("\(formatTime(proposal.start)) – \(formatTime(proposal.end))")
-                                .foregroundStyle(.secondary).monospacedDigit()
-                        }
-                    }
-                    .frame(width: 130, alignment: .leading)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        CompanyField(id: $proposal.match.companyId, name: $proposal.match.companyName, compact: true)
-                        if proposal.match.isAssigned {
-                            Text(reasonText).font(.callout).foregroundStyle(.secondary)
-                        } else {
-                            Text("Niet herkend. Je werkte in: \(proposal.activities.prefix(2).joined(separator: ", "))")
-                                .font(.callout).foregroundStyle(.secondary)
-                        }
-                    }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 6) {
-                        if let companyId = original.match.companyId, !clientChanged {
-                            Button("Geen klant?") {
-                                Matcher.exclude(companyId: companyId)
-                                AppModel.shared.changed()
-                            }
-                            .buttonStyle(.link)
-                            .help("\(original.match.companyName) is een leverancier of tool, geen klant: niet meer automatisch herkennen.")
-                        }
-                        Button(working ? "Bezig…" : "Registreer") {
-                            Task { await submit() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!canRegister || !proposal.match.isAssigned || working)
-                        Button("Negeer") { onDismiss() }
-                            .buttonStyle(.link)
-                            .help("Dit was geen werk (of je registreert het anders). Het voorstel verdwijnt.")
-                    }
-                }
-
-                HStack(spacing: 10) {
-                    TextField("Omschrijving (optioneel)", text: $proposal.description)
-                        .textFieldStyle(.roundedBorder)
-                    WorkTypePicker(id: $proposal.match.workTypeId, name: $proposal.match.workTypeName)
-                        .labelsHidden()
-                        .frame(width: 170)
-                    Toggle("Factureerbaar", isOn: $proposal.match.invoiceable)
-                }
-
-                HStack {
-                    Stepper("Duur \(formatDuration(proposal.seconds))",
-                            onIncrement: { proposal.seconds += 300 },
-                            onDecrement: { if proposal.seconds > 300 { proposal.seconds -= 300 } })
-                    if proposal.parts.count > 1 {
-                        Text(partsText).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
-                    }
-                    Spacer()
-                    if learnable {
-                        Toggle("Onthoud: ‘\(original.learnPattern)’ → \(proposal.match.companyName)", isOn: $remember)
-                    }
-                    Button(showDetails ? "Verberg details" : "Details") { showDetails.toggle() }.buttonStyle(.link)
-                }
-                .font(.callout)
-
+        HStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 2).fill(tint.gradient).frame(width: 4).padding(.vertical, 2)
+            VStack(alignment: .leading, spacing: 14) {
+                topRow
+                blocksRow
+                editRow
                 if showDetails {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 3) {
                         ForEach(proposal.activities, id: \.self) { Text("• \($0)") }
                     }
                     .font(.caption).foregroundStyle(.secondary)
                 }
                 if let error {
-                    Text(error).foregroundStyle(.red).font(.callout).textSelection(.enabled)
+                    Banner(icon: "xmark.octagon.fill", tint: .red, text: error)
                 }
             }
-            .padding(6)
+            .padding(.leading, 14)
         }
+        .card()
         .onChange(of: proposal) { edited in
-            // Bewaar aanpassingen in het model, zodat herladen of "Registreer alle" ze niet verliest.
-            DayModel.shared.edits[original.id] = edited == original ? nil : edited
+            // Bewaar aanpassingen in het model, zodat herladen of "Alles registreren" ze niet verliest.
+            model.edits[original.id] = edited == original ? nil : edited
             if !learnable { remember = false }
         }
         .onChange(of: original) { fresh in
             // Nieuw berekend voorstel (bv. lopend blok werd langer): overnemen als er niets aangepast is.
-            if DayModel.shared.edits[fresh.id] == nil { proposal = fresh }
+            if model.edits[fresh.id] == nil { proposal = fresh }
         }
+    }
+
+    private var topRow: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Avatar(name: proposal.match.isAssigned ? proposal.match.companyName : "", size: 40)
+            VStack(alignment: .leading, spacing: 6) {
+                CompanyField(id: $proposal.match.companyId, name: $proposal.match.companyName, compact: true)
+                    .font(.title3.weight(.semibold))
+                Text(reasonText).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 12)
+            VStack(alignment: .trailing, spacing: 8) {
+                Text(formatDuration(proposal.seconds))
+                    .font(.system(size: 26, weight: .semibold, design: .rounded)).monospacedDigit()
+                HStack(spacing: 8) {
+                    Menu {
+                        Button("Negeren (geen werk)") { model.dismiss(original) }
+                        if let companyId = original.match.companyId, !clientChanged {
+                            Button("\(original.match.companyName) is geen klant") {
+                                Matcher.exclude(companyId: companyId)
+                                AppModel.shared.changed()
+                            }
+                        }
+                        Button(showDetails ? "Details verbergen" : "Details tonen") { showDetails.toggle() }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Meer")
+                    Button {
+                        Task { await submit() }
+                    } label: {
+                        if working { ProgressView().controlSize(.small) } else { Label("Registreer", systemImage: "checkmark") }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(!model.canRegister || !proposal.match.isAssigned || working)
+                }
+            }
+        }
+    }
+
+    /// De werkblokken; klik op een blok om het aan een andere klant toe te wijzen.
+    private var blocksRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "clock").foregroundStyle(.secondary).font(.caption)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(proposal.parts) { part in
+                        Button { assigning = part } label: { BlockChip(part: part, tint: tint) }
+                            .buttonStyle(.plain)
+                            .help("Klik om dit blok aan een andere klant toe te wijzen")
+                    }
+                }
+            }
+        }
+        .popover(item: $assigning) { part in
+            BlockAssignView(part: part, current: proposal.match.companyName) {
+                assigning = nil
+                AppModel.shared.changed()
+            }
+        }
+    }
+
+    private var editRow: some View {
+        HStack(spacing: 10) {
+            TextField("Omschrijving (optioneel)", text: $proposal.description)
+                .textFieldStyle(.roundedBorder)
+            WorkTypePicker(id: $proposal.match.workTypeId, name: $proposal.match.workTypeName)
+                .labelsHidden()
+                .frame(width: 160)
+            Stepper(formatDuration(proposal.seconds),
+                    onIncrement: { proposal.seconds += 300 },
+                    onDecrement: { if proposal.seconds > 300 { proposal.seconds -= 300 } })
+                .monospacedDigit()
+                .help("Duur aanpassen per 5 minuten")
+            Toggle("Factureerbaar", isOn: $proposal.match.invoiceable)
+            if learnable {
+                Toggle("Onthoud", isOn: $remember)
+                    .help("Voortaan ‘\(original.learnPattern)’ → \(proposal.match.companyName)")
+            }
+        }
+        .font(.callout)
     }
 
     private var reasonText: String {
         if clientChanged { return "Door jou gekozen" }
-        return proposal.reasons.isEmpty ? "" : "Omdat: " + proposal.reasons.joined(separator: " en ")
-    }
-
-    /// "06:17–06:32, 09:00–09:15"
-    private var partsText: String {
-        proposal.parts.map { "\(formatTime($0.start))–\(formatTime($0.end))" }.joined(separator: ", ")
+        if !proposal.match.isAssigned {
+            return "Niet herkend · je werkte in " + proposal.activities.prefix(2).joined(separator: ", ")
+        }
+        return proposal.reasons.isEmpty ? "" : proposal.reasons.joined(separator: " · ")
     }
 
     private func submit() async {
@@ -404,8 +517,12 @@ struct ProposalCard: View {
                         companyName: proposal.match.companyName, workTypeId: proposal.match.workTypeId,
                         workTypeName: proposal.match.workTypeName, invoiceable: proposal.match.invoiceable)
         }
-        error = await onRegister(proposal, rule)
+        error = await model.register(proposal, learn: rule)
     }
+}
+
+extension Proposal.Part: Identifiable {
+    var id: String { "\(Int(start))-\(Int(end))" }
 }
 
 // MARK: - Tijdlijn met drie lanen
@@ -413,6 +530,9 @@ struct ProposalCard: View {
 struct DayTimeline: View {
     let plan: DayPlan
     let day: Date
+    var onChange: () -> Void = {}
+    @State private var assigning: Proposal.Part?
+    @State private var assigningLabel = ""
 
     private var range: (Double, Double) {
         let (lo, _) = Store.dayBounds(day)
@@ -431,20 +551,20 @@ struct DayTimeline: View {
             let labelWidth: CGFloat = 92
             let width = geo.size.width - labelWidth
             let x = { (t: Double) -> CGFloat in labelWidth + CGFloat((t - t0) / (t1 - t0)) * width }
-            let laneHeight: CGFloat = 26
+            let laneHeight: CGFloat = 28
+            let now = Date().timeIntervalSince1970
 
             ZStack(alignment: .topLeading) {
-                // Uurlijnen
                 ForEach(Array(stride(from: t0, through: t1, by: 3600)), id: \.self) { t in
-                    Rectangle().fill(Color.secondary.opacity(0.15)).frame(width: 1, height: laneHeight * 3 + 16)
+                    Rectangle().fill(Color.primary.opacity(0.06)).frame(width: 1, height: laneHeight * 3 + 16)
                         .offset(x: x(t))
                     Text(Date(timeIntervalSince1970: t).formatted(.dateTime.hour(.twoDigits(amPM: .omitted))))
                         .font(.caption2).foregroundStyle(.secondary)
-                        .offset(x: x(t) - 8, y: laneHeight * 3 + 18)
+                        .offset(x: x(t) - 8, y: laneHeight * 3 + 20)
                 }
-                lane("Teamleader", row: 0, height: laneHeight)
-                lane("Voorstel", row: 1, height: laneHeight)
-                lane("Activiteit", row: 2, height: laneHeight)
+                lane("Teamleader", icon: "checkmark.circle", row: 0, height: laneHeight)
+                lane("Voorstel", icon: "tray", row: 1, height: laneHeight)
+                lane("Activiteit", icon: "waveform", row: 2, height: laneHeight)
 
                 ForEach(plan.registered.filter { $0.start != nil }) { r in
                     block(from: x(r.start!), to: x(r.end!), row: 0, height: laneHeight,
@@ -453,23 +573,40 @@ struct DayTimeline: View {
                 }
                 ForEach(plan.proposals.flatMap { p in p.parts.map { (p, $0) } }, id: \.1) { item in
                     let (p, part) = item
-                    block(from: x(part.start), to: x(part.end), row: 1, height: laneHeight,
-                          color: p.match.isAssigned ? Color.forName(p.match.companyName).opacity(0.55) : Color.orange.opacity(0.45),
-                          label: p.match.isAssigned ? p.match.companyName : "?", dashed: true,
-                          help: "Voorstel: \(p.match.isAssigned ? p.match.companyName : "niet herkend") · \(formatDuration(p.seconds))\n\(formatTime(part.start))–\(formatTime(part.end))")
+                    Button {
+                        assigningLabel = p.match.isAssigned ? p.match.companyName : ""
+                        assigning = part
+                    } label: {
+                        block(from: x(part.start), to: x(part.end), row: 1, height: laneHeight,
+                              color: p.match.isAssigned ? Color.forName(p.match.companyName).opacity(0.55) : Color.orange.opacity(0.45),
+                              label: p.match.isAssigned ? p.match.companyName : "?", dashed: true,
+                              help: "Klik om toe te wijzen · \(p.match.isAssigned ? p.match.companyName : "niet herkend")\n\(formatTime(part.start))–\(formatTime(part.end))")
+                    }
+                    .buttonStyle(.plain)
                 }
                 ForEach(plan.activity) { a in
                     block(from: x(a.start), to: x(a.end), row: 2, height: laneHeight,
                           color: a.kind == .assigned ? Color.forName(a.label).opacity(0.8)
-                              : a.kind == .skipped ? Color.gray.opacity(0.25) : Color.gray.opacity(0.55),
+                              : a.kind == .skipped ? Color.gray.opacity(0.25) : Color.gray.opacity(0.45),
                           label: nil, help: "\(a.label)\n\(formatTime(a.start))–\(formatTime(a.end))")
+                }
+                if now > t0 && now < t1 && Calendar.current.isDate(day, inSameDayAs: Date()) {
+                    Rectangle().fill(Color.red).frame(width: 2, height: laneHeight * 3 + 12)
+                        .offset(x: x(now) - 1, y: -2)
+                        .help("Nu")
+                }
+            }
+            .popover(item: $assigning) { part in
+                BlockAssignView(part: part, current: assigningLabel) {
+                    assigning = nil
+                    onChange()
                 }
             }
         }
     }
 
-    private func lane(_ title: String, row: Int, height: CGFloat) -> some View {
-        Text(title)
+    private func lane(_ title: String, icon: String, row: Int, height: CGFloat) -> some View {
+        Label(title, systemImage: icon)
             .font(.caption.weight(.medium))
             .foregroundStyle(.secondary)
             .frame(height: height)
@@ -478,18 +615,19 @@ struct DayTimeline: View {
 
     private func block(from a: CGFloat, to b: CGFloat, row: Int, height: CGFloat, color: Color, label: String?,
                        dashed: Bool = false, help: String) -> some View {
-        let w = max(2, b - a)
-        return RoundedRectangle(cornerRadius: 4)
+        let w = max(3, b - a)
+        return RoundedRectangle(cornerRadius: 6, style: .continuous)
             .fill(color)
             .overlay {
                 if dashed {
-                    RoundedRectangle(cornerRadius: 4).strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                        .foregroundStyle(Color.primary.opacity(0.5))
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                        .foregroundStyle(Color.primary.opacity(0.4))
                 }
             }
             .overlay(alignment: .leading) {
-                if let label, w > 50 {
-                    Text(label).font(.caption2.weight(.semibold)).lineLimit(1).padding(.horizontal, 5)
+                if let label, w > 56 {
+                    Text(label).font(.caption2.weight(.semibold)).lineLimit(1).padding(.horizontal, 6)
                         .foregroundStyle(Color.black.opacity(0.75))
                 }
             }
