@@ -83,7 +83,12 @@ jobs:
       - name: Fouten en waarschuwingen tonen
         if: always()
         run: |
-          cat test.log build.log 2>/dev/null | grep -E "(error|warning):|failed|XCTAssert|Executed [0-9]+ test" | grep -v "^warning: " | sort -u | head -40 | while IFS= read -r line; do
+          # Eerst de namen van de mislukte tests (kort), dan de details.
+          grep -oE "Test Case '-\[[^]]+\]' failed" test.log 2>/dev/null | sort -u | sed -E "s/Test Case '-\[TimeTrackTests\.//; s/\]' failed//" | head -80 | while IFS= read -r line; do
+            echo "::warning::MISLUKT $line"
+          done
+          cat test.log build.log 2>/dev/null | grep -E "(error|warning):|XCTAssert|Executed [0-9]+ test|Fatal" | grep -v "^warning: " \
+            | sed -E 's#/Users/runner/work/[^ ]*/Tests/#Tests/#' | sort -u | head -120 | while IFS= read -r line; do
             echo "::warning::${line//$'\n'/ }"
           done
 
