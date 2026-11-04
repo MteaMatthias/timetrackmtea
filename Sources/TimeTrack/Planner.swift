@@ -15,17 +15,40 @@ struct Registered: Identifiable, Hashable {
 
 /// Voorstel voor een periode waarin gewerkt is maar die nog niet in Teamleader staat.
 struct Proposal: Identifiable, Hashable {
-    var start: Double
-    var end: Double
+    struct Part: Hashable {
+        var start: Double
+        var end: Double
+    }
+
+    var start: Double           // begin van het eerste blok (wordt het starttijdstip in Teamleader)
+    var end: Double             // einde van het laatste blok
     var match: Match
     var reasons: [String]       // waarom deze klant, bv. "website janssen.be · 1u10"
     var activities: [String]    // wat je deed
     var description: String
-    var learnPattern: String    // kandidaat voor een correctieregel (domein of programma)
+    var learnPattern: String    // kandidaat voor een correctieregel (domein, programma of chattitel)
+    /// De echte werkblokken. Bij "bundelen per klant" zijn dat er meerdere verspreid over de dag.
+    var parts: [Part]
+    /// Te registreren duur (som van de blokken, afgerond; aanpasbaar op de kaart).
+    var seconds: Double
+    var bundled = false
 
     /// Blijft gelijk terwijl het lopende blok langer wordt, zodat bewerkingen op een kaart niet verloren gaan.
-    var id: String { "\(Int(start))|\(match.key)" }
-    var duration: Double { end - start }
+    var id: String { bundled ? "dag|\(match.key)" : "\(Int(start))|\(match.key)" }
+    var duration: Double { seconds }
+
+    /// Haalt tijd weg van het einde van het laatste blok (voor registraties zonder tijdstip).
+    mutating func shorten(by amount: Double) {
+        var remaining = amount
+        while remaining > 0, let last = parts.last {
+            let take = min(remaining, last.end - last.start)
+            parts[parts.count - 1].end -= take
+            remaining -= take
+            if parts[parts.count - 1].end - parts[parts.count - 1].start < 1 { parts.removeLast() }
+        }
+        seconds = max(0, seconds - amount)
+        end = parts.last?.end ?? start
+    }
 }
 
 /// Activiteit op de tijdlijn, gekleurd per klant.
@@ -76,17 +99,45 @@ enum Planner {
     }
 
     static let calendarActivityMargin = 15.0 * 60
+    /// Werk in een AI-assistent zonder herkende klant krijgt de klant van het werk ervoor of erna (binnen deze marge).
+    static let assistantContextMinutes = 30
+
+    static let assistantApps: Set<String> = ["Claude", "ChatGPT", "Gemini", "Copilot", "Microsoft Copilot",
+                                             "Perplexity", "Le Chat", "Cursor"]
+    static let assistantHosts: Set<String> = ["claude.ai", "chatgpt.com", "chat.openai.com", "gemini.google.com",
+                                              "copilot.microsoft.com", "perplexity.ai", "www.perplexity.ai",
+                                              "chat.mistral.ai", "aistudio.google.com"]
+
+    static func isAssistant(app: String, host: String) -> Bool {
+        assistantApps.contains(app) || assistantHosts.contains(host)
+    }
+
+    /// "Offerte Janssen - Claude" → "Offerte Janssen"; een titel die enkel de naam van de assistent is, telt niet.
+    static func chatTitle(_ title: String, app: String) -> String {
+        var t = title
+        for suffix in [" - Claude", " – Claude", " | Claude", " - ChatGPT", " | ChatGPT", " - Gemini", " - Perplexity",
+                       " - Google Chrome", " — Google Chrome", " - Safari", " - Microsoft Edge"] where t.hasSuffix(suffix) {
+            t = String(t.dropLast(suffix.count))
+        }
+        t = t.trimmingCharacters(in: .whitespaces)
+        let generic: Set<String> = ["", app, "Claude", "ChatGPT", "Gemini", "Copilot", "Perplexity", "New chat",
+                                    "Nieuwe chat", "New Chat"]
+        return generic.contains(t) ? "" : t
+    }
 
     /// - Parameters:
     ///   - events: afspraken (nil = uit de agenda's op deze Mac); voor tests in te vullen.
     ///   - dismissed: genegeerde periodes (nil = uit de database).
+    ///   - bundle: per klant één voorstel voor de hele dag (in plaats van één per blok).
     static func plan(day: Date, registered: [Registered], matcher: Matcher = Matcher(), roundTo: Int = 5,
-                     events: [CalendarEvent]? = nil, dismissed: [(Double, Double)]? = nil) -> DayPlan {
+                     events: [CalendarEvent]? = nil, dismissed: [(Double, Double)]? = nil,
+                     bundle: Bool = false) -> DayPlan {
         let (lo, hi) = Store.dayBounds(day)
         let n = max(1, Int(((hi - lo) / 60).rounded()))
         var minutes = [[String: Info]](repeating: [:], count: n)
         var forced = [String?](repeating: nil, count: n)
         var skippedSeconds = [Double](repeating: 0, count: n)
+        var assistantSeconds = [Double](repeating: 0, count: n)
         var matches: [String: Match] = [:]
         var activity: [TimelineBlock] = []
 
@@ -115,8 +166,13 @@ enum Planner {
                 continue
             }
             matches[m.key] = m
-            let what = seg.host.isEmpty ? (seg.title.isEmpty ? seg.app : "\(seg.app): \(seg.title)") : "\(seg.app): \(seg.host)"
-            let learn = seg.host.isEmpty ? seg.app : seg.host
+            let assistant = isAssistant(app: seg.app, host: seg.host)
+            let chatTitle = Self.chatTitle(seg.title, app: seg.app)
+            let what = assistant && !chatTitle.isEmpty
+                ? "\(seg.host.isEmpty ? seg.app : seg.host): \(chatTitle)"
+                : seg.host.isEmpty ? (seg.title.isEmpty ? seg.app : "\(seg.app): \(seg.title)") : "\(seg.app): \(seg.host)"
+            // Bij een AI-chat is de titel van het gesprek de beste kandidaat om te onthouden.
+            let learn = assistant && !chatTitle.isEmpty ? chatTitle : (seg.host.isEmpty ? seg.app : seg.host)
             var t = seg.start
             while t < seg.end {
                 let i = index(t)
@@ -129,6 +185,7 @@ enum Planner {
                 info.activities[String(what.prefix(80)), default: 0] += s
                 info.learn[learn, default: 0] += s
                 minutes[i][m.key] = info
+                if assistant && !m.isAssigned { assistantSeconds[i] += s }
                 t = next
             }
         }
@@ -193,7 +250,16 @@ enum Planner {
             let i1 = min(n, Int(((b - lo) / 60).rounded(.up)))
             if i0 < i1 { for i in i0..<i1 { covered[i] = true } }
         }
-        for r in registered { if let s = r.start, let e = r.end { cover(s, e) } }
+        // Wat TimeTrack zelf registreerde, dekt de echte blokken (ook bij een gebundelde registratie);
+        // andere registraties dekken hun tijdstip in Teamleader.
+        let pushed = Store.pushedParts(ids: registered.map(\.id))
+        for r in registered {
+            if let parts = pushed[r.id] {
+                parts.forEach { cover($0.0, $0.1) }
+            } else if let s = r.start, let e = r.end {
+                cover(s, e)
+            }
+        }
         for (a, b) in dismissed ?? Store.dismissed(from: lo, to: hi) { cover(a, b) }
 
         func runs() -> [Run] {
@@ -246,41 +312,90 @@ enum Planner {
             if !changed { break }
         }
 
-        // 6. Voorstellen
-        var proposals: [Proposal] = []
-        for r in runs() where r.length >= minProposalMinutes && r.key != "skip" {
-            var info = Info()
+        // c. Niet-herkend werk in een AI-assistent (Claude, ChatGPT…) hoort meestal bij de klant waaraan je
+        //    vlak ervoor of erna werkte: die klant krijgt het, met de reden erbij.
+        let assistantRuns = runs().filter { r in
+            r.key.isEmpty && (r.from..<r.to).reduce(0) { $0 + assistantSeconds[$1] } >= Double(r.length) * 30
+        }
+        for r in assistantRuns {
+            let all = runs().filter { !$0.key.isEmpty && $0.key != "skip" }
+            let before = all.last { $0.to <= r.from && r.from - $0.to <= assistantContextMinutes }
+            let after = all.first { $0.from >= r.to && $0.from - r.to <= assistantContextMinutes }
+            guard let neighbour = before ?? after, let match = matches[neighbour.key] else { continue }
             for x in r.from..<r.to {
-                guard let part = minutes[x][r.key] else { continue }
-                info.seconds += part.seconds
-                part.reasons.forEach { info.reasons[$0.key, default: 0] += $0.value }
-                part.activities.forEach { info.activities[$0.key, default: 0] += $0.value }
-                part.learn.forEach { info.learn[$0.key, default: 0] += $0.value }
-                part.descriptions.forEach { info.descriptions[$0.key, default: 0] += $0.value }
+                guard var info = minutes[x][""] else { continue }
+                let assistantName = info.activities.max { $0.value < $1.value }?.key.split(separator: ":").first.map(String.init) ?? "AI"
+                info.reasons = ["\(assistantName) \(before != nil ? "na" : "voor") werk voor \(match.companyName)": info.seconds]
+                var merged = minutes[x][neighbour.key] ?? Info()
+                merged.seconds += info.seconds
+                info.reasons.forEach { merged.reasons[$0.key, default: 0] += $0.value }
+                info.activities.forEach { merged.activities[$0.key, default: 0] += $0.value }
+                info.learn.forEach { merged.learn[$0.key, default: 0] += $0.value }
+                minutes[x][neighbour.key] = merged
+                minutes[x][""] = nil
+                keyAt[x] = neighbour.key
             }
-            let match = matches[r.key] ?? .unassigned
-            let start = lo + Double(r.from) * 60
-            var end = lo + Double(r.to) * 60
+        }
+
+        // 6. Voorstellen: één per aaneengesloten blok, of (bundelen) één per klant voor de hele dag.
+        //    Bij bundelen tellen ook korte blokken van een herkende klant mee, want wie vaak wisselt,
+        //    werkt verspreid over de dag in kleine stukken voor dezelfde klant.
+        func top(_ d: [String: Double], _ k: Int) -> [(String, Double)] {
+            d.sorted { $0.value > $1.value }.prefix(k).map { ($0.key, $0.value) }
+        }
+        let step = Double(max(roundTo, 1) * 60)
+        var groups: [[Run]] = []
+        var groupIndex: [String: Int] = [:]
+        for r in runs() where r.key != "skip" {
+            if bundle && !r.key.isEmpty {
+                if let g = groupIndex[r.key] { groups[g].append(r) } else {
+                    groupIndex[r.key] = groups.count
+                    groups.append([r])
+                }
+            } else if r.length >= minProposalMinutes {
+                groups.append([r])
+            }
+        }
+        var proposals: [Proposal] = []
+        for group in groups {
+            let key = group[0].key
+            var info = Info()
+            for r in group {
+                for x in r.from..<r.to {
+                    guard let part = minutes[x][key] else { continue }
+                    info.seconds += part.seconds
+                    part.reasons.forEach { info.reasons[$0.key, default: 0] += $0.value }
+                    part.activities.forEach { info.activities[$0.key, default: 0] += $0.value }
+                    part.learn.forEach { info.learn[$0.key, default: 0] += $0.value }
+                    part.descriptions.forEach { info.descriptions[$0.key, default: 0] += $0.value }
+                }
+            }
+            let match = matches[key] ?? .unassigned
+            var parts = group.map { Proposal.Part(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60) }
+            let worked = parts.reduce(0) { $0 + $1.end - $1.start }
+            guard worked >= Double(minProposalMinutes * 60) else { continue }
+            var seconds = worked
             if roundTo > 1 {
-                // Duur afronden, maar nooit over een bestaande registratie of het volgende blok heen.
-                let step = Double(roundTo * 60)
-                let rounded = max(step, ((end - start) / step).rounded() * step)
-                var free = r.to
-                while free < n, !covered[free], keyAt[free] == nil { free += 1 }
-                end = min(start + rounded, lo + Double(free) * 60)
-            }
-            func top(_ d: [String: Double], _ k: Int) -> [(String, Double)] {
-                d.sorted { $0.value > $1.value }.prefix(k).map { ($0.key, $0.value) }
+                seconds = max(step, (worked / step).rounded() * step)
+                if group.count == 1 {
+                    // Eén blok: afronden, maar nooit over een bestaande registratie of het volgende blok heen.
+                    var free = group[0].to
+                    while free < n, !covered[free], keyAt[free] == nil { free += 1 }
+                    parts[0].end = min(parts[0].start + seconds, lo + Double(free) * 60)
+                    seconds = parts[0].end - parts[0].start
+                }
             }
             let reasons = match.isAssigned
                 ? top(info.reasons, 2).map { "\($0.0) · \(formatDuration($0.1))" }
                 : []
             proposals.append(Proposal(
-                start: start, end: end, match: match, reasons: reasons,
-                activities: top(info.activities, 4).map { "\($0.0) · \(formatDuration($0.1))" },
+                start: parts[0].start, end: parts[parts.count - 1].end, match: match, reasons: reasons,
+                activities: top(info.activities.filter { $0.value >= 30 }, 4).map { "\($0.0) · \(formatDuration($0.1))" },
                 description: match.description.isEmpty ? (top(info.descriptions, 1).first?.0 ?? "") : match.description,
-                learnPattern: top(info.learn, 1).first?.0 ?? ""))
+                learnPattern: top(info.learn, 1).first?.0 ?? "",
+                parts: parts, seconds: seconds, bundled: group.count > 1 || (bundle && !key.isEmpty)))
         }
+        proposals.sort { $0.start < $1.start }
 
         // 7. Registraties in Teamleader zonder tijdstip (enkel duur) aftrekken: eerst bij dezelfde klant,
         //    dan bij niet-herkend werk, dan bij de rest; telkens van het einde van het laatste voorstel.
@@ -297,7 +412,7 @@ enum Planner {
             }
             for k in order where remaining > 0 {
                 let take = min(remaining, proposals[k].duration)
-                proposals[k].end -= take
+                proposals[k].shorten(by: take)
                 remaining -= take
             }
         }

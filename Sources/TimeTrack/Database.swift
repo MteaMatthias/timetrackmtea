@@ -93,6 +93,15 @@ final class Database {
             );
             CREATE INDEX IF NOT EXISTS dismissed_end ON dismissed(end);
             """,
+            // 2: welke werkblokken een registratie van TimeTrack dekt (ook bij bundelen per klant)
+            """
+            CREATE TABLE IF NOT EXISTS pushed (
+                tl_id TEXT NOT NULL,
+                start REAL NOT NULL,
+                end REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS pushed_tl_id ON pushed(tl_id);
+            """,
         ]
         let current = Int(query("PRAGMA user_version").first?.int("user_version") ?? 0)
         for (i, sql) in migrations.enumerated() where i >= current {
@@ -123,6 +132,10 @@ final class Database {
     }
 
     func query(_ sql: String, _ args: Any?...) -> [Row] {
+        queryArgs(sql, args)
+    }
+
+    func queryArgs(_ sql: String, _ args: [Any?]) -> [Row] {
         lock.lock(); defer { lock.unlock() }
         guard let stmt = prepare(sql, args) else { return [] }
         defer { sqlite3_finalize(stmt) }

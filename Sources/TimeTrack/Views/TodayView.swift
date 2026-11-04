@@ -38,13 +38,17 @@ final class DayModel: ObservableObject {
             }
         }
         let matcher = Matcher.current()
-        plan = Planner.plan(day: day, registered: registered, matcher: matcher, roundTo: Prefs.roundTo)
+        plan = Planner.plan(day: day, registered: registered, matcher: matcher, roundTo: Prefs.roundTo,
+                            bundle: Prefs.bundlePerClient)
         let ids = Set(plan.proposals.map(\.id))
         edits = edits.filter { ids.contains($0.key) }
     }
 }
 
 enum Prefs {
+    /// Per klant één voorstel voor de hele dag (standaard aan).
+    static var bundlePerClient: Bool { UserDefaults.standard.object(forKey: "bundlePerClient") as? Bool ?? true }
+
     static var roundTo: Int {
         let v = UserDefaults.standard.integer(forKey: "roundTo")
         return v > 0 ? v : 5
@@ -157,7 +161,8 @@ struct TodayView: View {
                 ProposalCard(proposal: proposal, canRegister: canRegister) { edited, learn in
                     await register(edited, learn: learn)
                 } onDismiss: {
-                    Store.dismiss(start: proposal.start, end: proposal.end)
+                    // Enkel de echte blokken negeren (bij een gebundeld voorstel zit er ander werk tussen).
+                    proposal.parts.forEach { Store.dismiss(start: $0.start, end: $0.end) }
                     model.edits[proposal.id] = nil
                     Task { await model.reload() }
                 }
@@ -188,8 +193,9 @@ struct TodayView: View {
         busy = true
         defer { busy = false }
         do {
-            _ = try await teamleader.addTime(start: p.start, end: p.end, match: p.match, description: p.description,
-                                             invoiceable: p.match.invoiceable)
+            let id = try await teamleader.addTime(start: p.start, end: p.start + p.seconds, match: p.match,
+                                                  description: p.description, invoiceable: p.match.invoiceable)
+            Store.savePushed(teamleaderId: id, parts: p.parts)
             if let learn { Store.save(learn) }
             model.edits[p.id] = nil
             await model.reload()
@@ -205,8 +211,9 @@ struct TodayView: View {
         var failed = 0
         for p in proposals {
             do {
-                _ = try await teamleader.addTime(start: p.start, end: p.end, match: p.match, description: p.description,
-                                                 invoiceable: p.match.invoiceable)
+                let id = try await teamleader.addTime(start: p.start, end: p.start + p.seconds, match: p.match,
+                                                      description: p.description, invoiceable: p.match.invoiceable)
+                Store.savePushed(teamleaderId: id, parts: p.parts)
                 model.edits[p.id] = nil
             } catch {
                 failed += 1
@@ -289,9 +296,15 @@ struct ProposalCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline, spacing: 14) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("\(formatTime(proposal.start)) – \(formatTime(proposal.end))")
+                        Text(formatDuration(proposal.seconds))
                             .font(.title3.weight(.semibold)).monospacedDigit()
-                        Text(formatDuration(proposal.duration)).foregroundStyle(.secondary).monospacedDigit()
+                        if proposal.parts.count > 1 {
+                            Text("in \(proposal.parts.count) blokken").foregroundStyle(.secondary)
+                                .help(partsText)
+                        } else {
+                            Text("\(formatTime(proposal.start)) – \(formatTime(proposal.end))")
+                                .foregroundStyle(.secondary).monospacedDigit()
+                        }
                     }
                     .frame(width: 130, alignment: .leading)
 
@@ -335,10 +348,12 @@ struct ProposalCard: View {
                 }
 
                 HStack {
-                    Stepper("Start \(formatTime(proposal.start))", onIncrement: { move(start: 300) },
-                            onDecrement: { move(start: -300) })
-                    Stepper("Einde \(formatTime(proposal.end))", onIncrement: { move(end: 300) },
-                            onDecrement: { move(end: -300) })
+                    Stepper("Duur \(formatDuration(proposal.seconds))",
+                            onIncrement: { proposal.seconds += 300 },
+                            onDecrement: { if proposal.seconds > 300 { proposal.seconds -= 300 } })
+                    if proposal.parts.count > 1 {
+                        Text(partsText).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                    }
                     Spacer()
                     if learnable {
                         Toggle("Onthoud: ‘\(original.learnPattern)’ → \(proposal.match.companyName)", isOn: $remember)
@@ -375,11 +390,9 @@ struct ProposalCard: View {
         return proposal.reasons.isEmpty ? "" : "Omdat: " + proposal.reasons.joined(separator: " en ")
     }
 
-    private func move(start delta: Double = 0, end deltaEnd: Double = 0) {
-        let newStart = proposal.start + delta, newEnd = proposal.end + deltaEnd
-        guard newEnd - newStart >= 300 else { return }
-        proposal.start = newStart
-        proposal.end = newEnd
+    /// "06:17–06:32, 09:00–09:15"
+    private var partsText: String {
+        proposal.parts.map { "\(formatTime($0.start))–\(formatTime($0.end))" }.joined(separator: ", ")
     }
 
     private func submit() async {
@@ -438,11 +451,12 @@ struct DayTimeline: View {
                           color: Color.forName(r.companyName), label: r.companyName,
                           help: "\(r.companyName)\n\(formatTime(r.start!))–\(formatTime(r.end!)) · \(r.description)")
                 }
-                ForEach(plan.proposals) { p in
-                    block(from: x(p.start), to: x(p.end), row: 1, height: laneHeight,
+                ForEach(plan.proposals.flatMap { p in p.parts.map { (p, $0) } }, id: \.1) { item in
+                    let (p, part) = item
+                    block(from: x(part.start), to: x(part.end), row: 1, height: laneHeight,
                           color: p.match.isAssigned ? Color.forName(p.match.companyName).opacity(0.55) : Color.orange.opacity(0.45),
                           label: p.match.isAssigned ? p.match.companyName : "?", dashed: true,
-                          help: "Voorstel: \(p.match.isAssigned ? p.match.companyName : "niet herkend")\n\(formatTime(p.start))–\(formatTime(p.end))")
+                          help: "Voorstel: \(p.match.isAssigned ? p.match.companyName : "niet herkend") · \(formatDuration(p.seconds))\n\(formatTime(part.start))–\(formatTime(part.end))")
                 }
                 ForEach(plan.activity) { a in
                     block(from: x(a.start), to: x(a.end), row: 2, height: laneHeight,

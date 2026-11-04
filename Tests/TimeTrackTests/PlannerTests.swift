@@ -13,6 +13,7 @@ final class PlannerTests: XCTestCase {
         db.run("DELETE FROM rules")
         db.run("DELETE FROM dismissed")
         db.run("DELETE FROM companies")
+        db.run("DELETE FROM pushed")
         Store.replaceCompanies([janssen, peeters])
     }
 
@@ -26,9 +27,10 @@ final class PlannerTests: XCTestCase {
                             from, to, app, "", title, host)
     }
 
-    private func plan(registered: [Registered] = [], roundTo: Int = 1, events: [CalendarEvent] = []) -> DayPlan {
+    private func plan(registered: [Registered] = [], roundTo: Int = 1, events: [CalendarEvent] = [],
+                      bundle: Bool = false) -> DayPlan {
         Planner.plan(day: day, registered: registered, matcher: Matcher(ownDomain: "mtea.be", excluded: []),
-                     roundTo: roundTo, events: events)
+                     roundTo: roundTo, events: events, bundle: bundle)
     }
 
     func testWebsiteVisitBecomesProposalWithReason() {
@@ -229,5 +231,81 @@ final class PlannerTests: XCTestCase {
     func testDefaultInvoiceableComesFromTeamleaderPreference() {
         let (match, _) = Matcher(excluded: [], defaultInvoiceable: false).match(app: "Safari", title: "", host: "janssen.be")
         XCTAssertFalse(match.invoiceable)
+    }
+
+    // MARK: Bundelen per klant
+
+    func testBundleAddsUpBlocksOfTheSameClient() {
+        activity(t(6, 15), t(6, 30), host: "janssen.be")
+        activity(t(6, 30), t(9), app: "Figma", title: "Ontwerp")
+        activity(t(9), t(9, 15), host: "janssen.be")
+        let p = plan(bundle: true)
+        let janssen = p.proposals.filter { $0.match.companyId == "c-janssen" }
+        XCTAssertEqual(janssen.count, 1)
+        XCTAssertEqual(janssen[0].seconds, 30 * 60, accuracy: 1)
+        XCTAssertEqual(janssen[0].parts.count, 2)
+        XCTAssertEqual(janssen[0].start, t(6, 15))
+    }
+
+    func testBundleCountsShortSwitchesThatWouldOtherwiseBeLost() {
+        // Drie keer 4 minuten voor Janssen tussen ander werk: los te kort, samen 12 minuten.
+        for h in [9, 11, 14] {
+            activity(t(h), t(h, 4), host: "janssen.be")
+            activity(t(h, 4), t(h, 40), app: "Figma", title: "Ontwerp")
+        }
+        XCTAssertTrue(plan().proposals.allSatisfy { $0.match.companyId != "c-janssen" })
+        let bundled = plan(bundle: true).proposals.first { $0.match.companyId == "c-janssen" }
+        XCTAssertEqual(bundled?.seconds ?? 0, 12 * 60, accuracy: 1)
+    }
+
+    func testBundleRoundsTheDayTotal() {
+        activity(t(9), t(9, 8), host: "janssen.be")
+        activity(t(9, 8), t(10), app: "Figma", title: "Ontwerp")
+        activity(t(10), t(10, 9), host: "janssen.be")
+        let bundled = plan(roundTo: 15, bundle: true).proposals.first { $0.match.companyId == "c-janssen" }
+        XCTAssertEqual(bundled?.seconds ?? 0, 15 * 60, accuracy: 1)   // 17 min → 15 min
+    }
+
+    func testRegisteredBundleCoversTheRealBlocksNotTheSpan() {
+        activity(t(9), t(9, 30), host: "janssen.be")
+        activity(t(9, 30), t(10, 30), host: "bakkerijpeeters.be")
+        activity(t(10, 30), t(11), host: "janssen.be")
+        // TimeTrack registreerde Janssen gebundeld: 1 uur vanaf 9:00 (in Teamleader 9:00–10:00).
+        Store.savePushed(teamleaderId: "tl-1", parts: [.init(start: t(9), end: t(9, 30)), .init(start: t(10, 30), end: t(11))])
+        let registered = Registered(id: "tl-1", start: t(9), duration: 3600, companyId: "c-janssen",
+                                    companyName: "Janssen NV", description: "")
+        let p = plan(registered: [registered], bundle: true)
+        XCTAssertEqual(p.proposals.map(\.match.companyId), ["c-peeters"])
+        XCTAssertEqual(p.proposals.first?.seconds ?? 0, 3600, accuracy: 1)
+    }
+
+    // MARK: AI-assistenten
+
+    func testChatTitleIsReadable() {
+        XCTAssertEqual(Planner.chatTitle("Offerte Janssen - Claude", app: "Google Chrome"), "Offerte Janssen")
+        XCTAssertEqual(Planner.chatTitle("Claude", app: "Claude"), "")
+    }
+
+    func testChatMentioningClientIsRecognised() {
+        activity(t(9), t(9, 30), app: "Claude", title: "Offerte Bakkerij Peeters herschrijven")
+        XCTAssertEqual(plan().proposals.first?.match.companyId, "c-peeters")
+    }
+
+    func testUnrecognisedChatGetsClientOfSurroundingWork() {
+        activity(t(9), t(10), host: "janssen.be")
+        activity(t(10), t(10, 25), app: "Claude", title: "Tekst herschrijven")
+        let p = plan()
+        XCTAssertEqual(p.proposals.count, 1, "\(p.proposals.map { "\($0.start)-\($0.end) \($0.match.companyName)" })")
+        XCTAssertEqual(p.proposals.first?.end, t(10, 25))
+        XCTAssertTrue(p.proposals.first?.reasons.contains { $0.contains("na werk voor Janssen NV") } ?? false,
+                      "\(p.proposals.first?.reasons ?? [])")
+    }
+
+    func testChatFarFromOtherWorkStaysUnrecognisedAndLearnsTheChatTitle() {
+        activity(t(9), t(9, 20), host: "janssen.be")
+        activity(t(11), t(11, 25), host: "claude.ai", title: "Nieuwsbrief november - Claude")
+        let chat = plan().proposals.first { $0.start == t(11) }
+        XCTAssertFalse(chat?.match.isAssigned ?? true)
+        XCTAssertEqual(chat?.learnPattern, "Nieuwsbrief november")
     }
 }

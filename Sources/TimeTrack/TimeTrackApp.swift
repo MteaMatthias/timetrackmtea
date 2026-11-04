@@ -24,12 +24,17 @@ struct TimeTrackApp: App {
 
 /// Het hoofdvenster wordt zelf beheerd: het opent bij de eerste start, via het menubalk-icoon of een melding,
 /// maar niet bij elke aanmelding.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static weak var shared: AppDelegate?
     private var window: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
+        // Automatisch starten staat standaard aan (eenmalig bij de eerste start).
+        if !UserDefaults.standard.bool(forKey: "launchAtLoginAsked") {
+            UserDefaults.standard.set(true, forKey: "launchAtLoginAsked")
+            try? LaunchAtLogin.set(true)
+        }
         Tracker.shared.start()
         Reminder.shared.start()
         Task { @MainActor in
@@ -67,10 +72,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             w.isReleasedWhenClosed = false
             w.center()
             w.setFrameAutosaveName("TimeTrackMain")
+            w.delegate = self
             window = w
         }
+        // Zolang het venster open is, staat TimeTrack ook in het Dock en in ⌘-Tab (makkelijk terug te vinden,
+        // ook als het menubalk-icoon achter de inkeping van het scherm verdwijnt).
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
     }
 }
 

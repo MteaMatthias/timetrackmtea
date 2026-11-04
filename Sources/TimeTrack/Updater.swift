@@ -133,7 +133,8 @@ final class Reminder: NSObject, UNUserNotificationCenterDelegate {
             guard Teamleader.shared.isConnected,
                   let registered = try? await Teamleader.shared.registered(from: lo, to: hi) else { return }
             let matcher = Matcher.current()
-            let plan = Planner.plan(day: now, registered: registered, matcher: matcher, roundTo: Prefs.roundTo)
+            let plan = Planner.plan(day: now, registered: registered, matcher: matcher, roundTo: Prefs.roundTo,
+                                    bundle: Prefs.bundlePerClient)
             guard plan.proposedSeconds >= 15 * 60 else { return }
             let clients = Set(plan.proposals.filter { $0.match.isAssigned }.map { $0.match.companyName })
             let content = UNMutableNotificationContent()

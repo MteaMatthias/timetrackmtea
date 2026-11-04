@@ -108,7 +108,8 @@ struct WeekView: View {
                 if let s = r.start { return s >= a && s < b }
                 return r.day == key
             }
-            let plan = Planner.plan(day: d, registered: mine, matcher: matcher, roundTo: Prefs.roundTo)
+            let plan = Planner.plan(day: d, registered: mine, matcher: matcher, roundTo: Prefs.roundTo,
+                                    bundle: Prefs.bundlePerClient)
             return Summary(id: d, worked: plan.worked, registered: plan.registeredSeconds, proposed: plan.proposedSeconds)
         }
     }

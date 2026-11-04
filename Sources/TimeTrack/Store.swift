@@ -136,6 +136,25 @@ enum Store {
         }
     }
 
+    // MARK: Geregistreerde blokken
+
+    static func savePushed(teamleaderId: String, parts: [Proposal.Part]) {
+        Database.shared.transaction {
+            for p in parts {
+                Database.shared.run("INSERT INTO pushed(tl_id, start, end) VALUES (?,?,?)", teamleaderId, p.start, p.end)
+            }
+        }
+    }
+
+    static func pushedParts(ids: [String]) -> [String: [(Double, Double)]] {
+        guard !ids.isEmpty else { return [:] }
+        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        var out: [String: [(Double, Double)]] = [:]
+        let rows = Database.shared.queryArgs("SELECT tl_id, start, end FROM pushed WHERE tl_id IN (\(placeholders))", ids)
+        for r in rows { out[r.string("tl_id"), default: []].append((r.double("start"), r.double("end"))) }
+        return out
+    }
+
     // MARK: Genegeerde voorstellen
 
     static func dismissed(from lo: Double, to hi: Double) -> [(Double, Double)] {

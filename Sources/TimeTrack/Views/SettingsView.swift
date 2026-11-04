@@ -143,11 +143,7 @@ struct OnboardingView: View {
         .padding(28)
         .frame(width: 720)
         .onAppear {
-            // Automatisch starten en de dagelijkse melding staan standaard aan.
-            if !UserDefaults.standard.bool(forKey: "launchAtLoginAsked") {
-                UserDefaults.standard.set(true, forKey: "launchAtLoginAsked")
-                try? LaunchAtLogin.set(true)
-            }
+            // De dagelijkse melding staat standaard aan: meteen om toestemming vragen.
             Task { await Reminder.shared.requestPermission() }
         }
     }
@@ -163,6 +159,7 @@ struct SettingsView: View {
     @AppStorage("idleMinutes") private var idleMinutes = 5
     @AppStorage("roundTo") private var roundTo = 5
     @AppStorage("calendarDisabled") private var calendarDisabled = false
+    @AppStorage("bundlePerClient") private var bundlePerClient = true
     @State private var portalURL = ""
     @State private var useCustomClient = false
     @State private var clientId = ""
@@ -177,6 +174,8 @@ struct SettingsView: View {
 
             Section("Voorstellen") {
                 Stepper("Inactief na \(idleMinutes) min zonder muis of toetsenbord", value: $idleMinutes, in: 2...30)
+                Toggle("Per klant één voorstel per dag (alle blokken samengeteld)", isOn: $bundlePerClient)
+                    .onChange(of: bundlePerClient) { _ in appModel.changed() }
                 Picker("Duur afronden op", selection: $roundTo) {
                     Text("1 minuut").tag(1)
                     Text("5 minuten").tag(5)

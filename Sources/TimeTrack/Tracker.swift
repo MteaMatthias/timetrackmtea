@@ -35,6 +35,8 @@ final class Tracker: ObservableObject {
     func start() {
         guard timer == nil else { return }
         // Zonder dit zet macOS een app zonder zichtbaar venster in "App Nap" en vallen metingen weg.
+        // Geldt voor alle Accessibility-vragen (ook het zoeken naar de chattitel): nooit langer dan 0,5 s wachten.
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
         activity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep], reason: "Tijdsregistratie")
         let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.tick() }
@@ -143,7 +145,43 @@ final class Tracker: ObservableObject {
                 title = value as? String ?? ""
             }
         }
-        return (app.localizedName ?? "?", app.bundleIdentifier ?? "", title)
+        let name = app.localizedName ?? "?"
+        // Electron-apps (Claude, ChatGPT, Slack…) tonen vaak enkel hun naam als venstertitel;
+        // de titel van het gesprek staat dan in de webinhoud van het venster.
+        if (title.isEmpty || title == name), let window, CFGetTypeID(window) == AXUIElementGetTypeID(),
+           let inner = webAreaTitle(window as! AXUIElement), inner != name {
+            title = inner
+        }
+        return (name, app.bundleIdentifier ?? "", title)
+    }
+
+    /// Zoekt (beperkt in diepte en aantal) het eerste AXWebArea-element en geeft zijn titel terug.
+    private static func webAreaTitle(_ root: AXUIElement) -> String? {
+        var queue: [(AXUIElement, Int)] = [(root, 0)]
+        var visited = 0
+        while !queue.isEmpty, visited < 150 {
+            let (element, depth) = queue.removeFirst()
+            visited += 1
+            var role: CFTypeRef?
+            AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+            if (role as? String) == "AXWebArea" {
+                for attribute in [kAXTitleAttribute, kAXDescriptionAttribute] {
+                    var value: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+                       let text = value as? String, !text.trimmingCharacters(in: .whitespaces).isEmpty {
+                        return text
+                    }
+                }
+                return nil
+            }
+            guard depth < 8 else { continue }
+            var children: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+               let list = children as? [AXUIElement] {
+                queue.append(contentsOf: list.prefix(30).map { ($0, depth + 1) })
+            }
+        }
+        return nil
     }
 
     static func idleSeconds() -> Double {
