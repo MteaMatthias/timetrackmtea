@@ -16,8 +16,9 @@ struct DetectedCall: Equatable {
 }
 
 /// Volgt oproepen in Flow (Telavox) en meetings (Teams, Zoom, Google Meet, Loom, FaceTime, Webex).
-/// Zodra een gesprek loopt (niet tijdens het rinkelen) verschijnt rechtsboven "Is dit klant X?". Voor een
-/// nummer dat je al eens bevestigde, wordt niets meer gevraagd. Het gesprek komt met de klant in het dagvoorstel.
+/// Zodra een gesprek loopt (niet tijdens het rinkelen) verschijnt in het midden "Is dit klant X?", bij elk
+/// gesprek opnieuw, met de vorige keuze voor dit nummer als voorstel. Elk gesprek komt als eigen registratie
+/// met zijn echte duur in het dagvoorstel; een gemiste oproep niet.
 /// Het uitlezen gebeurt op de achtergrond, zodat TimeTrack nooit hapert.
 @MainActor
 final class CallWatcher: ObservableObject {
@@ -111,7 +112,8 @@ final class CallWatcher: ObservableObject {
         }
         numberUnknownInTeamleader = d.kind == .phone && !(Phone.key(d.number).map(Store.companyHasPhone) ?? true)
         addNumberToCompany = !UserDefaults.standard.bool(forKey: "addPhoneDisabled")
-        record.id = Store.save(record)
+        // Een oproep die nog rinkelt, wordt pas bewaard als ze opgenomen wordt (gemist = geen werk).
+        if wasActive { record.id = Store.save(record) }
         current = record
         pendingDetection = d
         if wasActive { Task { await self.promptIfNeeded() } }
@@ -149,7 +151,9 @@ final class CallWatcher: ObservableObject {
             record.start = now
         }
         record.end = now
-        Store.save(record)
+        if wasActive {
+            if record.id == 0 { record.id = Store.save(record) } else { _ = Store.save(record) }
+        }
         current = record
         if wasActive { await promptIfNeeded() }
     }
@@ -161,7 +165,7 @@ final class CallWatcher: ObservableObject {
         guard let record = current else { return }
         if !wasActive {
             // Gemiste of geweigerde oproep: geen werk.
-            Store.deleteCall(id: record.id)
+            if record.id != 0 { Store.deleteCall(id: record.id) }
             current = nil
             CallPrompt.shared.hide()
             return

@@ -205,7 +205,34 @@ final class Matcher {
         guard let r = title.range(of: pattern, options: .regularExpression) else {
             return title.trimmingCharacters(in: .whitespaces)
         }
-        return String(title[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+        var page = String(title[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+        // Edge zet het profiel vóór de browsernaam: "Pagina - Profiel - Microsoft Edge".
+        if title[r].contains("Edge"),
+           let p = page.range(of: #"\s[-–—]\s[^-–—]{1,40}$"#, options: .regularExpression) {
+            let profile = page[p].dropFirst(3).trimmingCharacters(in: .whitespaces)
+            if isEdgeProfile(profile) {
+                page = String(page[..<p.lowerBound]).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return page
+    }
+
+    /// De profielnamen uit Edge zelf ("Local State"). Lukt dat niet, dan gelden korte namen als profiel.
+    private static let edgeProfiles: Set<String>? = {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Microsoft Edge/Local State")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cache = (json["profile"] as? [String: Any])?["info_cache"] as? [String: Any] else { return nil }
+        let names = cache.values.compactMap { ($0 as? [String: Any])?["name"] as? String }
+        return names.isEmpty ? nil : Set(names.map { $0.lowercased() })
+    }()
+
+    private static func isEdgeProfile(_ s: String) -> Bool {
+        let l = s.lowercased()
+        if ["personal", "persoonlijk", "work", "werk", "profiel 1", "profile 1"].contains(l) { return true }
+        if let known = edgeProfiles { return known.contains(l) }
+        return (1...2).contains(l.split(separator: " ").count) && !l.contains(where: { !$0.isLetter && $0 != " " })
     }
 
     private func compute(app: String, title rawTitle: String, host: String) -> (Match, String) {

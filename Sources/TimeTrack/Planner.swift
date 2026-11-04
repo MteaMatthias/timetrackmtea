@@ -266,23 +266,34 @@ enum Planner {
         //     agenda; een gesprek zonder klant overschrijft geen herkend werk; "geen klant" telt niet.
         // Elk gesprek krijgt een eigen sleutel ("call:…"): het wordt een eigen registratie met zijn echte
         // begintijd en duur, en wordt nooit bij ander werk voor die klant opgeteld.
-        var callTimes: [String: (start: Double, end: Double)] = [:]
+        struct CallItem {
+            let key: String
+            let start: Double
+            let end: Double
+            let match: Match
+            let reason: String
+            let activity: String
+            let description: String
+        }
+        var callItems: [CallItem] = []
         for (number, call) in (calls ?? Store.calls(from: lo, to: hi)).enumerated() where !call.skip {
+            let start = max(call.start, lo), end = min(call.end, hi)
+            // Een gesprek van een paar seconden (bv. één verkeerd gelezen moment) is geen werk.
+            guard end - start >= 10 else { continue }
             let m = call.match
             let callKey = "call:\(call.id == 0 ? Int64(number) : call.id):" + m.key
             matches[callKey] = m
-            callTimes[callKey] = (max(call.start, lo), min(call.end, hi))
             let reason = call.kind == .phone
                 ? "telefoon met \(call.detail.isEmpty ? call.label : call.detail)"
                 : "meeting: \(call.label)"
-            let first = index(call.start)
-            let last = min(n, Int(((call.end - lo) / 60).rounded(.up)))
+            callItems.append(CallItem(key: callKey, start: start, end: end, match: m, reason: reason,
+                                      activity: call.kind == .phone ? "Telefoon: \(call.label)" : "Meeting: \(call.label)",
+                                      description: call.kind == .meeting ? call.label : ""))
+            let first = index(start)
+            let last = min(n, Int(((end - lo) / 60).rounded(.up)))
             guard first < last else { continue }
             for i in first..<last {
-                if !m.isAssigned {
-                    let assignedActivity = minutes[i].filter { !$0.key.isEmpty }.values.reduce(0) { $0 + $1.seconds }
-                    if assignedActivity >= 30 { continue }
-                }
+                // Een gesprek gaat altijd voor: ook met een onbekende beller is het werk.
                 forced[i] = callKey
                 var info = Info()
                 info.seconds = 60
@@ -344,15 +355,29 @@ enum Planner {
         }
         // Wat TimeTrack zelf registreerde, dekt de echte blokken (ook bij een gebundelde registratie);
         // andere registraties dekken hun tijdstip in Teamleader.
+        var coveredExact: [(Double, Double)] = []
         let pushed = Store.pushedParts(ids: registered.map(\.id))
         for r in registered {
             if let parts = pushed[r.id] {
                 parts.forEach { cover($0.0, $0.1) }
+                coveredExact += parts
+                // Naar boven afgerond (bv. 53 min → 1 u): de extra minuten na het laatste blok zijn al
+                // geregistreerd voor die klant, en dekken dus ook werk voor diezelfde klant (niets anders).
+                if let companyId = r.companyId, let lastEnd = parts.map(\.1).max(), let s = r.start {
+                    let tailEnd = max(lastEnd, s + r.duration)
+                    let i0 = max(0, Int(((lastEnd - lo) / 60).rounded(.up)))
+                    let i1 = min(n, Int(((tailEnd - lo) / 60).rounded(.down)))
+                    if i0 < i1 { for i in i0..<i1 where keyAt[i] == companyId { covered[i] = true } }
+                }
             } else if let s = r.start, let e = r.end {
                 cover(s, e)
+                coveredExact.append((s, e))
             }
         }
-        for (a, b) in dismissed ?? Store.dismissed(from: lo, to: hi) { cover(a, b) }
+        for (a, b) in dismissed ?? Store.dismissed(from: lo, to: hi) {
+            cover(a, b)
+            coveredExact.append((a, b))
+        }
 
         func runs() -> [Run] {
             var out: [Run] = []
@@ -376,7 +401,7 @@ enum Planner {
             while j < n, keyAt[j] == nil, !covered[j], skippedSeconds[j] < minSecondsPerMinute { j += 1 }
             if j == i { i += 1; continue }
             if j - i <= bridgeMinutes, i > 0, j < n, !covered[i - 1], !covered[j],
-               let k = keyAt[i - 1], keyAt[j] == k {
+               let k = keyAt[i - 1], keyAt[j] == k, !k.hasPrefix("call:") {
                 for x in i..<j { keyAt[x] = k }
             }
             i = j
@@ -388,8 +413,9 @@ enum Planner {
             let all = runs()
             var applied = false
             for (idx, r) in all.enumerated() where !pinned[r.from] {
-                let prev: Run? = idx > 0 && all[idx - 1].to == r.from ? all[idx - 1] : nil
-                let next: Run? = idx + 1 < all.count && all[idx + 1].from == r.to ? all[idx + 1] : nil
+                // Een gesprek slorpt niets op: werk ervoor of erna maakt het gesprek niet langer.
+                let prev: Run? = idx > 0 && all[idx - 1].to == r.from && !all[idx - 1].key.hasPrefix("call:") ? all[idx - 1] : nil
+                let next: Run? = idx + 1 < all.count && all[idx + 1].from == r.to && !all[idx + 1].key.hasPrefix("call:") ? all[idx + 1] : nil
                 let keepShort = bundle && !r.key.isEmpty
                 var target: String?
                 if r.length < minProposalMinutes, !keepShort, let p = prev, let q = next, p.key == q.key {
@@ -417,19 +443,22 @@ enum Planner {
             let all = runs().filter { !$0.key.isEmpty && $0.key != "skip" }
             let before = all.last { $0.to <= r.from && r.from - $0.to <= assistantContextMinutes }
             let after = all.first { $0.from >= r.to && $0.from - r.to <= assistantContextMinutes }
-            guard let neighbour = before ?? after, let match = matches[neighbour.key] else { continue }
+            guard let neighbour = before ?? after, let match = matches[neighbour.key], match.isAssigned else { continue }
+            // Na of voor een gesprek: de klant van dat gesprek, maar als gewoon werk (het gesprek blijft even lang).
+            let targetKey = match.key
+            matches[targetKey] = match
             for x in r.from..<r.to {
                 guard var info = minutes[x][""] else { continue }
                 let assistantName = info.activities.max { $0.value < $1.value }?.key.split(separator: ":").first.map(String.init) ?? "AI"
                 info.reasons = ["\(assistantName) \(before != nil ? "na" : "voor") werk voor \(match.companyName)": info.seconds]
-                var merged = minutes[x][neighbour.key] ?? Info()
+                var merged = minutes[x][targetKey] ?? Info()
                 merged.seconds += info.seconds
                 info.reasons.forEach { merged.reasons[$0.key, default: 0] += $0.value }
                 info.activities.forEach { merged.activities[$0.key, default: 0] += $0.value }
                 info.learn.forEach { merged.learn[$0.key, default: 0] += $0.value }
-                minutes[x][neighbour.key] = merged
+                minutes[x][targetKey] = merged
                 minutes[x][""] = nil
-                keyAt[x] = neighbour.key
+                keyAt[x] = targetKey
             }
         }
 
@@ -489,7 +518,7 @@ enum Planner {
 
         var groups: [[Run]] = []
         var groupIndex: [String: Int] = [:]
-        for run in runs() where run.key != "skip" {
+        for run in runs() where run.key != "skip" && !run.key.hasPrefix("call:") {
             for r in run.key.isEmpty ? splitUnassigned(run) : [run] {
             if bundle && !r.key.isEmpty && !r.key.hasPrefix("call:") {
                 if let g = groupIndex[r.key] { groups[g].append(r) } else {
@@ -516,22 +545,11 @@ enum Planner {
                 }
             }
             let match = matches[key] ?? .unassigned
-            var parts = group.map { Proposal.Part(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60) }
-            var worked = parts.reduce(0) { $0 + $1.end - $1.start }
-            let hasCall = group.contains { r in (r.from..<r.to).contains { isCall[$0] } }
-            guard worked >= Double(minProposalMinutes * 60) || hasCall else { continue }
-            let isCallGroup = key.hasPrefix("call:")
-            if isCallGroup, let times = callTimes[key], group.count == 1,
-               index(times.start) == group[0].from, Int(((times.end - lo) / 60).rounded(.up)) == group[0].to {
-                // Het volledige gesprek: de echte begin- en eindtijd, niet de minuutgrenzen.
-                parts = [Proposal.Part(start: times.start, end: times.end)]
-                worked = times.end - times.start
-            }
+            let parts = group.map { Proposal.Part(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60) }
+            let worked = parts.reduce(0) { $0 + $1.end - $1.start }
+            guard worked >= Double(minProposalMinutes * 60) else { continue }
             var seconds = worked
-            if isCallGroup {
-                // Een gesprek: de echte duur, op de minuut naar boven (niet op 5 of 15 min).
-                seconds = max(60, (worked / 60).rounded(.up) * 60)
-            } else if roundTo > 1 {
+            if roundTo > 1 {
                 // Enkel de duur afronden. De blokken blijven de echte minuten: wat geregistreerd wordt, dekt
                 // nooit tijd die nog moet komen (anders valt bv. een volgend gesprek weg).
                 seconds = max(step, (worked / step).rounded() * step)
@@ -545,13 +563,36 @@ enum Planner {
                 description: match.description.isEmpty ? (top(info.descriptions, 1).first?.0 ?? "") : match.description,
                 learnPattern: top(info.learn, 1).first?.0 ?? "",
                 parts: parts, seconds: seconds,
-                bundled: !isCallGroup && (group.count > 1 || (bundle && !key.isEmpty)),
-                isCall: isCallGroup,
+                bundled: group.count > 1 || (bundle && !key.isEmpty),
+                isCall: false,
                 pieces: group.flatMap { r in
                     pieces(of: r).map {
                         Proposal.Piece(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60, label: $0.label)
                     }
                 }))
+        }
+        // Gesprekken: rechtstreeks uit hun echte begin- en eindtijd (op de seconde), min wat al geregistreerd
+        // of genegeerd is. Zo krijgt elk gesprek zijn eigen tijd, ook twee gesprekken in dezelfde minuut.
+        for item in callItems {
+            var remaining = [(item.start, item.end)]
+            for (a, b) in coveredExact {
+                remaining = remaining.flatMap { (s, e) -> [(Double, Double)] in
+                    guard a < e, b > s else { return [(s, e)] }
+                    return [(s, min(a, e)), (max(b, s), e)].filter { $0.1 - $0.0 > 0 }
+                }
+            }
+            let total = remaining.reduce(0) { $0 + $1.1 - $1.0 }
+            guard total >= 10, let first = remaining.first else { continue }
+            let pieces = remaining.map { Proposal.Piece(start: $0.0, end: $0.1, label: item.activity) }
+            proposals.append(Proposal(
+                start: first.0, end: remaining[remaining.count - 1].1, match: item.match,
+                reasons: item.match.isAssigned ? [item.reason] : [],
+                activities: ["\(item.activity) · \(formatDuration(total))"],
+                description: item.match.description.isEmpty ? item.description : item.match.description,
+                learnPattern: "",
+                parts: remaining.map { Proposal.Part(start: $0.0, end: $0.1) },
+                seconds: max(60, (total / 60).rounded(.up) * 60),
+                isCall: true, pieces: pieces))
         }
         proposals.sort { $0.start < $1.start }
 
@@ -568,7 +609,7 @@ enum Planner {
                 let ra = rank(proposals[a]), rb = rank(proposals[b])
                 return ra != rb ? ra < rb : proposals[a].start > proposals[b].start
             }
-            for k in order where remaining > 0 {
+            for k in order where remaining > 0 && !proposals[k].isCall {
                 let take = min(remaining, proposals[k].duration)
                 proposals[k].shorten(by: take)
                 remaining -= take

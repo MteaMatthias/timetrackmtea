@@ -56,7 +56,11 @@ enum Phone {
     static func digits(_ s: String) -> String { s.filter(\.isNumber) }
 
     static func key(_ s: String) -> String? {
-        let d = digits(s)
+        // Zelfde nummer, andere schrijfwijze: "056 11 09 59", "+32 56 11 09 59" en "0032 56 11 09 59"
+        // geven dezelfde sleutel. Belgische vaste nummers hebben 8 cijfers na de 0, gsm-nummers 9.
+        var d = digits(s)
+        if d.hasPrefix("00") { d.removeFirst(2) } else if d.hasPrefix("0") { d.removeFirst() }
+        if d.hasPrefix("32"), (10...11).contains(d.count) { d.removeFirst(2) }
         guard d.count >= 8 else { return nil }
         return String(d.suffix(9))
     }
