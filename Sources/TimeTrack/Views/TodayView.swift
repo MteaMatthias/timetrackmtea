@@ -33,13 +33,30 @@ final class DayModel: ObservableObject {
     /// Aanpassingen op een kaart gelden ook in het menubalk-paneel (gedeeld met het hoofdvenster).
     func proposalToRegister(_ p: Proposal) -> Proposal { edits[p.id] ?? DayModel.shared.edits[p.id] ?? p }
 
+    /// De hoogste generatie waarvan het herladen afgelopen is (gelukt, mislukt of verouderd).
+    private var finishedGeneration = 0
+
+    /// Herlaadt het dagplan. Komt er intussen een nieuwer herladen bij, dan wacht dit tot dat klaar is:
+    /// na `await reload()` is het plan altijd actueel (bv. "Alles registreren" gebruikt nooit een verouderd plan).
     func reload() async {
+        await load()
+        var waited = 0
+        while finishedGeneration < generation && waited < 600 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            waited += 1
+        }
+    }
+
+    private func load() async {
         generation += 1
         let gen = generation
         let day = self.day
         let (lo, hi) = Store.dayBounds(day)
         loading = true
-        defer { if gen == generation { loading = false } }
+        defer {
+            if gen == generation { loading = false }
+            finishedGeneration = max(finishedGeneration, gen)
+        }
         var registered: [Registered] = []
         var loaded = false
         var failure: String?
