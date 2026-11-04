@@ -40,18 +40,26 @@ jobs:
           CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
         if: env.CERT_P12 != ''
         run: |
+          fail() { echo "::error::Certificaat: $1"; exit 1; }
           KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
-          security create-keychain -p ci "$KEYCHAIN"
+          security create-keychain -p ci "$KEYCHAIN" || fail "keychain aanmaken"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p ci "$KEYCHAIN"
-          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KEYCHAIN"
+          security unlock-keychain -p ci "$KEYCHAIN" || fail "keychain ontgrendelen"
+          # Spaties of regeleinden uit het geplakte geheim halen.
+          printf '%s' "$CERT_P12" | tr -d ' \r\n\t' | base64 --decode > "$RUNNER_TEMP/cert.p12" 2>"$RUNNER_TEMP/b64.err" \
+            || fail "SIGNING_CERT_P12 is geen geldige base64 ($(head -c 200 "$RUNNER_TEMP/b64.err"))"
+          echo "p12: $(wc -c < "$RUNNER_TEMP/cert.p12") bytes"
+          PW="$(printf '%s' "$CERT_PASSWORD" | tr -d ' \r\n\t')"
+          OUT=$(security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$PW" -T /usr/bin/codesign 2>&1) \
+            || fail "importeren mislukt: ${OUT//$'\n'/ } (klopt SIGNING_CERT_PASSWORD?)"
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KEYCHAIN" >/dev/null || fail "toegang voor codesign"
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           # Zelfondertekend: als vertrouwd markeren voor codesigning op de build-machine.
-          openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -clcerts -nokeys -passin "pass:$CERT_PASSWORD" -out "$RUNNER_TEMP/cert.pem" || true
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem" || true
-          security find-identity -p codesigning
+          openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -clcerts -nokeys -passin "pass:$PW" -out "$RUNNER_TEMP/cert.pem" 2>/dev/null \
+            || openssl pkcs12 -legacy -in "$RUNNER_TEMP/cert.p12" -clcerts -nokeys -passin "pass:$PW" -out "$RUNNER_TEMP/cert.pem" 2>/dev/null || true
+          [ -s "$RUNNER_TEMP/cert.pem" ] && sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem" || true
+          security find-identity -p codesigning "$KEYCHAIN"
+          echo "::notice::Certificaat ingeladen: $(security find-identity -p codesigning "$KEYCHAIN" | grep -c 'MTEA TimeTrack') identiteit(en)"
 
       - name: Tests
         run: TIMETRACK_DATA_DIR="$RUNNER_TEMP/tt-test" swift test 2>&1 | tee test.log; exit ${PIPESTATUS[0]}
