@@ -35,6 +35,8 @@ jobs:
           echo "BUILD=${{ github.run_number }}" >> "$GITHUB_ENV"
 
       - name: Ondertekeningscertificaat importeren
+        id: cert
+        continue-on-error: true
         env:
           CERT_P12: ${{ secrets.SIGNING_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
@@ -80,14 +82,11 @@ jobs:
           name: TimeTrack-${{ env.VERSION }}
           path: build/TimeTrack.zip
 
-      - name: Waarschuwing zonder vast certificaat
-        if: env.RELEASE_TAG != ''
-        env:
-          CERT_P12: ${{ secrets.SIGNING_CERT_P12 }}
+      - name: Release enkel met vast certificaat
+        if: env.RELEASE_TAG != '' && steps.cert.outcome != 'success'
         run: |
-          if [ -z "$CERT_P12" ]; then
-            echo "::warning::Release zonder vast certificaat (SIGNING_CERT_P12): macOS vraagt na deze update opnieuw om toestemmingen. Zie README."
-          fi
+          echo "::error::Geen release zonder vast certificaat: anders verliest iedereen na de update de toestemmingen. Zet SIGNING_CERT_P12 en SIGNING_CERT_PASSWORD correct (zie README)."
+          exit 1
 
       - name: Release publiceren
         if: env.RELEASE_TAG != ''
