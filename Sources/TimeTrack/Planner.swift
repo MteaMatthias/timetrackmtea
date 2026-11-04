@@ -109,6 +109,7 @@ enum Planner {
     }
 
     static let calendarActivityMargin = 15.0 * 60
+    static let phoneApps: Set<String> = ["Flow", "Telavox"]
     /// Werk in een AI-assistent zonder herkende klant krijgt de klant van het werk ervoor of erna (binnen deze marge).
     static let assistantContextMinutes = 30
 
@@ -164,6 +165,18 @@ enum Planner {
         // 1. Activiteit op de laptop
         let segments = Store.segments(from: lo, to: hi).filter { !$0.isIdle }
         for seg in segments {
+            // Tijd in de telefoonapp buiten een gesprek is geen werk; het gesprek zelf telt via de oproepen (2b).
+            if phoneApps.contains(seg.app) {
+                var t = seg.start
+                while t < seg.end {
+                    let i = index(t)
+                    let next = min(seg.end, lo + Double(i + 1) * 60)
+                    guard next > t else { break }
+                    skippedSeconds[i] += next - t
+                    t = next
+                }
+                continue
+            }
             let (m, reason) = matcher.match(app: seg.app, title: seg.title, host: seg.host)
             let label = m.skip ? "Genegeerd" : (m.isAssigned ? m.companyName : "Niet toegewezen")
             let kind: TimelineBlock.Kind = m.skip ? .skipped : (m.isAssigned ? .assigned : .unassigned)
@@ -435,7 +448,18 @@ enum Planner {
         /// Niet-herkend werk opdelen per activiteit (bv. 34 min Claude-chat, daarna 20 min klaviyo.com),
         /// zodat elk deel apart een klant kan krijgen. Deeltjes korter dan 5 min gaan naar de buur.
         func splitUnassigned(_ r: Run) -> [Run] {
-            var parts = pieces(of: r).map { (from: $0.from, to: $0.to) }
+            var parts = pieces(of: r).map { (from: $0.from, to: $0.to, learn: $0.learn) }
+            func coalesce() {
+                var i = 1
+                while i < parts.count {
+                    if parts[i].learn == parts[i - 1].learn {
+                        parts[i - 1].to = parts[i].to
+                        parts.remove(at: i)
+                    } else {
+                        i += 1
+                    }
+                }
+            }
             var changed = true
             while changed && parts.count > 1 {
                 changed = false
@@ -445,6 +469,7 @@ enum Planner {
                     let right = i + 1 < parts.count ? parts[i + 1].to - parts[i + 1].from : -1
                     if left >= right { parts[i - 1].to = parts[i].to } else { parts[i + 1].from = parts[i].from }
                     parts.remove(at: i)
+                    coalesce()
                     changed = true
                 }
             }
@@ -480,19 +505,14 @@ enum Planner {
                 }
             }
             let match = matches[key] ?? .unassigned
-            var parts = group.map { Proposal.Part(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60) }
+            let parts = group.map { Proposal.Part(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60) }
             let worked = parts.reduce(0) { $0 + $1.end - $1.start }
             guard worked >= Double(minProposalMinutes * 60) else { continue }
             var seconds = worked
             if roundTo > 1 {
+                // Enkel de duur afronden. De blokken blijven de echte minuten: wat geregistreerd wordt, dekt
+                // nooit tijd die nog moet komen (anders valt bv. een volgend gesprek weg).
                 seconds = max(step, (worked / step).rounded() * step)
-                if group.count == 1 {
-                    // Eén blok: afronden, maar nooit over een bestaande registratie of het volgende blok heen.
-                    var free = group[0].to
-                    while free < n, !covered[free], keyAt[free] == nil { free += 1 }
-                    parts[0].end = min(parts[0].start + seconds, lo + Double(free) * 60)
-                    seconds = parts[0].end - parts[0].start
-                }
             }
             let reasons = match.isAssigned
                 ? top(info.reasons, 2).map { "\($0.0) · \(formatDuration($0.1))" }

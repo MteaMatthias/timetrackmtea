@@ -508,4 +508,37 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(p.proposals.first { $0.match.companyId == "c-janssen" }?.duration ?? 0, 20 * 60, accuracy: 1)
         XCTAssertEqual(p.proposals.first { $0.match.companyId == "c-peeters" }?.duration ?? 0, 20 * 60, accuracy: 1)
     }
+
+    // MARK: Gesprekken na elkaar
+
+    func testRoundingDoesNotExtendTheRealBlock() {
+        activity(t(10), t(10, 4), app: "Flow", title: "Flow")
+        let call = CallRecord(start: t(10), end: t(10, 4), kind: .phone, label: "0493 29 50 63",
+                              companyId: "c-janssen", companyName: "Janssen NV", confirmed: true)
+        let p = plan(roundTo: 5, calls: [call])
+        XCTAssertEqual(p.proposals.first?.seconds ?? 0, 5 * 60, accuracy: 1)
+        XCTAssertEqual(p.proposals.first?.parts.last?.end, t(10, 4), "het blok zelf blijft 10:00–10:04")
+    }
+
+    func testSecondCallAfterRegisteringTheFirstIsProposedAgain() {
+        let first = CallRecord(start: t(10), end: t(10, 4), kind: .phone, label: "0493 29 50 63",
+                               companyId: "c-janssen", companyName: "Janssen NV", confirmed: true)
+        let second = CallRecord(start: t(10, 5), end: t(10, 11), kind: .phone, label: "0493 29 50 63",
+                                companyId: "c-janssen", companyName: "Janssen NV", confirmed: true)
+        activity(t(10), t(10, 11), app: "Flow", title: "Flow")
+        // Het eerste gesprek werd geregistreerd (afgerond op 5 min, dus tot 10:05 in Teamleader).
+        Store.savePushed(teamleaderId: "tl-call", parts: [.init(start: t(10), end: t(10, 4))])
+        let registered = Registered(id: "tl-call", start: t(10), duration: 300, companyId: "c-janssen",
+                                    companyName: "Janssen NV", description: "")
+        let p = plan(registered: [registered], roundTo: 5, calls: [first, second])
+        XCTAssertEqual(p.proposals.count, 1)
+        XCTAssertEqual(p.proposals.first?.start, t(10, 5))
+        XCTAssertEqual(p.proposals.first?.seconds ?? 0, 5 * 60, accuracy: 1)
+    }
+
+    func testTimeInThePhoneAppOutsideACallIsNotWork() {
+        activity(t(10), t(10, 20), app: "Flow", title: "Flow")
+        XCTAssertTrue(plan().proposals.isEmpty)
+        XCTAssertEqual(plan().worked, 0, accuracy: 1)
+    }
 }

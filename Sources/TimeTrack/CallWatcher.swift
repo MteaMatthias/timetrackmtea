@@ -88,14 +88,13 @@ final class CallWatcher: ObservableObject {
                                 memoryKey: d.memoryKey)
         let remembered = Store.callMemory(d.memoryKey)
         if let remembered {
-            // Al eens beantwoord: niets meer vragen.
+            // Al eens beantwoord: die klant voorstellen (en gebruiken als je niet antwoordt), maar wel vragen,
+            // want hetzelfde nummer kan over een andere klant bellen.
             record.companyId = remembered.companyId
             record.companyName = remembered.companyName
             record.skip = remembered.skip
-            record.confirmed = true
-            answered = true
             suggestion = remembered.skip ? nil : remembered
-            suggestionReason = "eerder door jou gekozen"
+            suggestionReason = remembered.skip ? "vorige keer: geen klant" : "eerder door jou gekozen"
         } else {
             let matcher = Matcher.current()
             var guess: (Match, String)?
