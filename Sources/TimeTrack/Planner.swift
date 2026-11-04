@@ -20,6 +20,14 @@ struct Proposal: Identifiable, Hashable {
         var end: Double
     }
 
+    /// Een deel van een blok met één soort activiteit (bv. "Claude: Offerte · 07:13–07:35"); apart toe te wijzen.
+    struct Piece: Hashable, Identifiable {
+        var start: Double
+        var end: Double
+        var label: String
+        var id: String { "\(Int(start))-\(Int(end))" }
+    }
+
     var start: Double           // begin van het eerste blok (wordt het starttijdstip in Teamleader)
     var end: Double             // einde van het laatste blok
     var match: Match
@@ -32,6 +40,8 @@ struct Proposal: Identifiable, Hashable {
     /// Te registreren duur (som van de blokken, afgerond; aanpasbaar op de kaart).
     var seconds: Double
     var bundled = false
+    /// Wat er binnen de blokken gebeurde, per activiteit (voor "binnen een blok per deel toewijzen").
+    var pieces: [Piece] = []
 
     /// Blijft gelijk terwijl het lopende blok langer wordt, zodat bewerkingen op een kaart niet verloren gaan.
     var id: String { bundled ? "dag|\(match.key)" : "\(Int(start))|\(match.key)" }
@@ -406,9 +416,45 @@ enum Planner {
             d.sorted { $0.value > $1.value }.prefix(k).map { ($0.key, $0.value) }
         }
         let step = Double(max(roundTo, 1) * 60)
+        /// Opeenvolgende minuten met dezelfde hoofdactiviteit (label) en kandidaat-regel (learn).
+        func pieces(of r: Run) -> [(from: Int, to: Int, label: String, learn: String)] {
+            var out: [(from: Int, to: Int, label: String, learn: String)] = []
+            for x in r.from..<r.to {
+                let info = minutes[x][r.key]
+                let label = info?.activities.max { $0.value < $1.value }?.key ?? out.last?.label ?? "Pauze"
+                let learn = info?.learn.max { $0.value < $1.value }?.key ?? out.last?.learn ?? ""
+                if let last = out.last, last.learn == learn {
+                    out[out.count - 1].to = x + 1
+                } else {
+                    out.append((x, x + 1, label, learn))
+                }
+            }
+            return out
+        }
+
+        /// Niet-herkend werk opdelen per activiteit (bv. 34 min Claude-chat, daarna 20 min klaviyo.com),
+        /// zodat elk deel apart een klant kan krijgen. Deeltjes korter dan 5 min gaan naar de buur.
+        func splitUnassigned(_ r: Run) -> [Run] {
+            var parts = pieces(of: r).map { (from: $0.from, to: $0.to) }
+            var changed = true
+            while changed && parts.count > 1 {
+                changed = false
+                if let i = parts.indices.filter({ parts[$0].to - parts[$0].from < minProposalMinutes })
+                    .min(by: { parts[$0].to - parts[$0].from < parts[$1].to - parts[$1].from }) {
+                    let left = i > 0 ? parts[i - 1].to - parts[i - 1].from : -1
+                    let right = i + 1 < parts.count ? parts[i + 1].to - parts[i + 1].from : -1
+                    if left >= right { parts[i - 1].to = parts[i].to } else { parts[i + 1].from = parts[i].from }
+                    parts.remove(at: i)
+                    changed = true
+                }
+            }
+            return parts.map { Run(key: r.key, from: $0.from, to: $0.to) }
+        }
+
         var groups: [[Run]] = []
         var groupIndex: [String: Int] = [:]
-        for r in runs() where r.key != "skip" {
+        for run in runs() where run.key != "skip" {
+            for r in run.key.isEmpty ? splitUnassigned(run) : [run] {
             if bundle && !r.key.isEmpty {
                 if let g = groupIndex[r.key] { groups[g].append(r) } else {
                     groupIndex[r.key] = groups.count
@@ -416,6 +462,7 @@ enum Planner {
                 }
             } else if r.length >= minProposalMinutes {
                 groups.append([r])
+            }
             }
         }
         var proposals: [Proposal] = []
@@ -455,7 +502,12 @@ enum Planner {
                 activities: top(info.activities.filter { $0.value >= 30 }, 4).map { "\($0.0) · \(formatDuration($0.1))" },
                 description: match.description.isEmpty ? (top(info.descriptions, 1).first?.0 ?? "") : match.description,
                 learnPattern: top(info.learn, 1).first?.0 ?? "",
-                parts: parts, seconds: seconds, bundled: group.count > 1 || (bundle && !key.isEmpty)))
+                parts: parts, seconds: seconds, bundled: group.count > 1 || (bundle && !key.isEmpty),
+                pieces: group.flatMap { r in
+                    pieces(of: r).map {
+                        Proposal.Piece(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60, label: $0.label)
+                    }
+                }))
         }
         proposals.sort { $0.start < $1.start }
 

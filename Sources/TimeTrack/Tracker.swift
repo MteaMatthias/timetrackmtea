@@ -162,14 +162,29 @@ final class Tracker: ObservableObject {
         // Electron-apps (Claude, ChatGPT, Slack…) tonen vaak enkel hun naam als venstertitel;
         // de titel van het gesprek staat dan in de webinhoud van het venster.
         if (title.isEmpty || title == name), let window, CFGetTypeID(window) == AXUIElementGetTypeID(),
-           let inner = webAreaTitle(window as! AXUIElement), inner != name {
-            title = inner
+           let web = webArea(window as! AXUIElement) {
+            if let inner = web.title, inner != name, inner != "Claude", inner != "ChatGPT" {
+                title = inner
+            } else if let url = web.url, let chat = chatName(url) {
+                // Chat-apps tonen geen gesprekstitel: een vaste naam per gesprek, zodat "Onthoud" werkt.
+                title = chat
+            }
         }
         return (name, app.bundleIdentifier ?? "", title)
     }
 
-    /// Zoekt (beperkt in diepte en aantal) het eerste AXWebArea-element en geeft zijn titel terug.
-    private static func webAreaTitle(_ root: AXUIElement) -> String? {
+    /// "https://claude.ai/chat/4f2a91c3-…" → "Claude-chat 4f2a91c3"
+    private static func chatName(_ url: URL) -> String? {
+        guard let host = url.host?.lowercased() else { return nil }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard let index = parts.firstIndex(where: { $0 == "chat" || $0 == "c" }), index + 1 < parts.count else { return nil }
+        let id = String(parts[index + 1].prefix(8))
+        let app = host.contains("claude") ? "Claude" : host.contains("openai") || host.contains("chatgpt") ? "ChatGPT" : host
+        return "\(app)-chat \(id)"
+    }
+
+    /// Zoekt (beperkt in diepte en aantal) het eerste AXWebArea-element: titel en adres van de inhoud.
+    private static func webArea(_ root: AXUIElement) -> (title: String?, url: URL?)? {
         var queue: [(AXUIElement, Int)] = [(root, 0)]
         var visited = 0
         while !queue.isEmpty, visited < 150 {
@@ -178,14 +193,18 @@ final class Tracker: ObservableObject {
             var role: CFTypeRef?
             AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
             if (role as? String) == "AXWebArea" {
+                var title: String?
                 for attribute in [kAXTitleAttribute, kAXDescriptionAttribute] {
                     var value: CFTypeRef?
-                    if AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+                    if title == nil, AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
                        let text = value as? String, !text.trimmingCharacters(in: .whitespaces).isEmpty {
-                        return text
+                        title = text
                     }
                 }
-                return nil
+                var urlValue: CFTypeRef?
+                AXUIElementCopyAttributeValue(element, "AXURL" as CFString, &urlValue)
+                let url = (urlValue as? URL) ?? (urlValue as? String).flatMap(URL.init(string:))
+                return (title, url)
             }
             guard depth < 8 else { continue }
             var children: CFTypeRef?

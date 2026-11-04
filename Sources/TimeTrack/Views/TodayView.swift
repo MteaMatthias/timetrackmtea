@@ -479,6 +479,8 @@ struct ProposalCard: View {
             // Bewaar aanpassingen in het model, zodat herladen of "Alles registreren" ze niet verliest.
             model.edits[original.id] = edited == original ? nil : edited
             if !learnable { remember = false }
+            // Een vaste chatnaam is altijd specifiek: dan meteen onthouden.
+            else if original.learnPattern.contains("-chat ") { remember = true }
         }
         .onChange(of: original) { fresh in
             // Nieuw berekend voorstel (bv. lopend blok werd langer): overnemen als er niets aangepast is.
@@ -537,13 +539,13 @@ struct ProposalCard: View {
                     ForEach(proposal.parts) { part in
                         Button { assigning = part } label: { BlockChip(part: part, tint: tint) }
                             .buttonStyle(.plain)
-                            .help("Klik om dit blok aan een andere klant toe te wijzen")
+                            .help("Klik om dit blok, of een deel ervan, aan een klant toe te wijzen")
                     }
                 }
             }
         }
         .popover(item: $assigning) { part in
-            BlockAssignView(part: part, current: proposal.match.companyName) {
+            BlockAssignView(part: part, current: proposal.match.companyName, pieces: proposal.pieces) {
                 assigning = nil
                 AppModel.shared.changed()
             }
@@ -606,6 +608,7 @@ struct DayTimeline: View {
     var onChange: () -> Void = {}
     @State private var assigning: Proposal.Part?
     @State private var assigningLabel = ""
+    @State private var assigningPieces: [Proposal.Piece] = []
 
     private var range: (Double, Double) {
         let (lo, _) = Store.dayBounds(day)
@@ -648,6 +651,7 @@ struct DayTimeline: View {
                     let (p, part) = item
                     Button {
                         assigningLabel = p.match.isAssigned ? p.match.companyName : ""
+                        assigningPieces = p.pieces
                         assigning = part
                     } label: {
                         block(from: x(part.start), to: x(part.end), row: 1, height: laneHeight,
@@ -670,7 +674,7 @@ struct DayTimeline: View {
                 }
             }
             .popover(item: $assigning) { part in
-                BlockAssignView(part: part, current: assigningLabel) {
+                BlockAssignView(part: part, current: assigningLabel, pieces: assigningPieces) {
                     assigning = nil
                     onChange()
                 }

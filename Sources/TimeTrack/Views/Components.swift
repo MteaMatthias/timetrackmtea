@@ -215,36 +215,98 @@ struct BlockChip: View {
     }
 }
 
-/// Popover om één blok aan een klant toe te wijzen of te negeren.
+/// Popover om een blok (of een deel ervan) aan een klant toe te wijzen of te negeren.
 struct BlockAssignView: View {
     @EnvironmentObject var teamleader: Teamleader
     let part: Proposal.Part
     let current: String
+    var pieces: [Proposal.Piece] = []
     let onDone: () -> Void
     @State private var companyId: String?
     @State private var companyName = ""
+    @State private var openPiece: String?
+    @State private var pieceCompanyId: String?
+    @State private var pieceCompanyName = ""
+
+    /// De delen binnen dit blok (enkel tonen als er meer dan één soort activiteit was).
+    private var inside: [Proposal.Piece] {
+        pieces.filter { $0.end > part.start && $0.start < part.end }
+            .map { Proposal.Piece(start: max($0.start, part.start), end: min($0.end, part.end), label: $0.label) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("\(formatTime(part.start)) – \(formatTime(part.end))").font(.headline).monospacedDigit()
-            Text(current.isEmpty ? "Nog niet toegewezen." : "Nu: \(current)").font(.callout).foregroundStyle(.secondary)
-            CompanyField(id: $companyId, name: $companyName, compact: true)
-            HStack {
+            HStack(alignment: .firstTextBaseline) {
+                Text("\(formatTime(part.start)) – \(formatTime(part.end))").font(.headline).monospacedDigit()
+                Text(formatDuration(part.end - part.start)).foregroundStyle(.secondary)
+                Spacer()
+                Text(current.isEmpty ? "niet toegewezen" : current).font(.callout).foregroundStyle(.secondary)
+            }
+            Text("Hele blok").font(.subheadline.weight(.semibold))
+            HStack(alignment: .top) {
+                CompanyField(id: $companyId, name: $companyName, compact: true)
                 Button("Toewijzen") {
                     Store.assign(start: part.start, end: part.end, to: Match(companyId: companyId, companyName: companyName))
                     onDone()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(companyName.isEmpty)
-                Spacer()
                 Button("Geen werk") {
                     Store.dismiss(start: part.start, end: part.end)
                     onDone()
                 }
-                .help("Dit blok niet registreren")
             }
+            if inside.count > 1 {
+                Divider()
+                Text("Of per deel").font(.subheadline.weight(.semibold))
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(inside) { piece in pieceRow(piece) }
+                    }
+                }
+            }
+            Spacer(minLength: 0)
         }
         .padding(16)
-        .frame(width: 340, height: 280, alignment: .topLeading)
+        .frame(width: 560, height: inside.count > 1 ? 460 : 260, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func pieceRow(_ piece: Proposal.Piece) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("\(formatTime(piece.start))–\(formatTime(piece.end))").monospacedDigit().frame(width: 96, alignment: .leading)
+                Text(piece.label).lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Text(formatDuration(piece.end - piece.start)).foregroundStyle(.secondary).monospacedDigit()
+                Button(openPiece == piece.id ? "Sluiten" : "Klant…") {
+                    openPiece = openPiece == piece.id ? nil : piece.id
+                    pieceCompanyId = nil
+                    pieceCompanyName = ""
+                }
+                .buttonStyle(.link)
+            }
+            if openPiece == piece.id {
+                HStack(alignment: .top) {
+                    CompanyField(id: $pieceCompanyId, name: $pieceCompanyName, compact: true)
+                    Button("Toewijzen") {
+                        Store.assign(start: piece.start, end: piece.end,
+                                     to: Match(companyId: pieceCompanyId, companyName: pieceCompanyName))
+                        onDone()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(pieceCompanyName.isEmpty)
+                    Button("Geen werk") {
+                        Store.dismiss(start: piece.start, end: piece.end)
+                        onDone()
+                    }
+                }
+                .padding(.leading, 104)
+            }
+        }
+        .font(.callout)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.04)))
     }
 }

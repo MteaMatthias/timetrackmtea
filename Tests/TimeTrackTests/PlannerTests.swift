@@ -470,4 +470,42 @@ final class PlannerTests: XCTestCase {
         Store.pruneOldActivity()
         XCTAssertEqual(Database.shared.query("SELECT COUNT(*) AS n FROM activity").first?.int("n"), 1)
     }
+
+    // MARK: Opdelen van niet-herkend werk
+
+    func testUnrecognisedWorkIsSplitPerActivity() {
+        activity(t(7, 13), t(7, 47), app: "Claude", title: "Claude-chat 4f2a91c3")
+        activity(t(7, 47), t(8, 7), host: "klaviyo.com")
+        let p = plan()
+        XCTAssertEqual(p.proposals.count, 2, "\(p.proposals.map { "\($0.start)-\($0.end)" })")
+        XCTAssertEqual(p.proposals.first?.learnPattern, "Claude-chat 4f2a91c3")
+        XCTAssertEqual(p.proposals.last?.learnPattern, "klaviyo.com")
+    }
+
+    func testTinyUnrecognisedPiecesStayWithTheirNeighbour() {
+        activity(t(9), t(9, 30), app: "Figma", title: "Ontwerp")
+        activity(t(9, 30), t(9, 32), host: "klaviyo.com")
+        activity(t(9, 32), t(10), app: "Figma", title: "Ontwerp")
+        let p = plan()
+        XCTAssertEqual(p.proposals.count, 1)
+        XCTAssertEqual(p.proposals.first?.duration ?? 0, 3600, accuracy: 1)
+    }
+
+    func testPiecesShowWhatHappenedInsideABlock() {
+        activity(t(9), t(9, 20), host: "janssen.be")
+        activity(t(9, 20), t(9, 40), app: "Microsoft Word", title: "Offerte Janssen.docx")
+        let p = plan()
+        XCTAssertEqual(p.proposals.count, 1)
+        XCTAssertEqual(p.proposals.first?.pieces.count, 2)
+        XCTAssertEqual(p.proposals.first?.pieces.last?.start, t(9, 20))
+    }
+
+    func testAssigningAPieceMovesOnlyThatPiece() {
+        activity(t(9), t(9, 20), host: "janssen.be")
+        activity(t(9, 20), t(9, 40), app: "Microsoft Word", title: "Offerte Janssen.docx")
+        Store.assign(start: t(9, 20), end: t(9, 40), to: Match(companyId: "c-peeters", companyName: "Bakkerij Peeters BV"))
+        let p = plan()
+        XCTAssertEqual(p.proposals.first { $0.match.companyId == "c-janssen" }?.duration ?? 0, 20 * 60, accuracy: 1)
+        XCTAssertEqual(p.proposals.first { $0.match.companyId == "c-peeters" }?.duration ?? 0, 20 * 60, accuracy: 1)
+    }
 }
