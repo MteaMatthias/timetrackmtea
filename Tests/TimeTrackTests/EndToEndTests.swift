@@ -835,6 +835,15 @@ final class E2EFakeTeamleader: URLProtocol {
             return (200, ["data": data])
         case "timeTracking.add":
             _endpoints.append(endpoint)
+            // Zoals de echte Teamleader: een lege omschrijving of een duur zonder minuten wordt geweigerd.
+            if let d = json["description"], (d as? String)?.isEmpty ?? true {
+                _adds.append(json)
+                return (400, ["errors": [["status": 400, "title": "description must be null"]]])
+            }
+            guard (json["duration"] as? NSNumber)?.intValue ?? 0 > 0, json["started_at"] is String else {
+                _adds.append(json)
+                return (400, ["errors": [["status": 400, "title": "started_at and duration are required"]]])
+            }
             let id = "tt-\(nextId)"
             nextId += 1
             _adds.append(json)

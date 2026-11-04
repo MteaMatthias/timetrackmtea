@@ -398,9 +398,11 @@ final class Teamleader: ObservableObject {
         var body: [String: Any] = [
             "started_at": iso.string(from: Date(timeIntervalSince1970: start)),
             "duration": Int((end - start).rounded()),
-            "description": description,
             "invoiceable": invoiceable,
         ]
+        // Teamleader weigert een lege omschrijving ("description must be null"): dan het veld weglaten.
+        let text = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty { body["description"] = text }
         if let company = match.companyId { body["subject"] = ["type": "company", "id": company] }
         if let workType = match.workTypeId { body["work_type_id"] = workType }
         let result = try await call("timeTracking.add", body)
