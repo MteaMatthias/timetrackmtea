@@ -26,7 +26,13 @@ final class AcceptanceTests: XCTestCase {
 
     /// Tijdstip op de testdag (of een andere dag), bv. t(13, 30) of t(10, 0, 20).
     private func t(_ h: Int, _ m: Int = 0, _ s: Int = 0, on date: Date? = nil) -> Double {
-        Calendar.current.date(bySettingHour: h, minute: m, second: s, of: date ?? day)!.timeIntervalSince1970
+        let base = date ?? day
+        if (0..<24).contains(h), (0..<60).contains(m), (0..<60).contains(s),
+           let exact = Calendar.current.date(bySettingHour: h, minute: m, second: s, of: base) {
+            return exact.timeIntervalSince1970
+        }
+        // Minuten of seconden buiten het bereik (bv. 9u64): optellen vanaf middernacht.
+        return Calendar.current.startOfDay(for: base).timeIntervalSince1970 + Double(h * 3600 + m * 60 + s)
     }
 
     private var nextDay: Date { Calendar.current.date(byAdding: .day, value: 1, to: day)! }
