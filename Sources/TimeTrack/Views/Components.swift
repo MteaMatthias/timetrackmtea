@@ -35,14 +35,18 @@ struct CompanyField: View {
                 Spacer(minLength: 0)
             }
             if name.isEmpty && (!results.isEmpty || query.count >= 2) {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(results) { item in
-                        Button(item.name) { pick(item.id, item.name) }.buttonStyle(.link)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(results) { item in
+                            Button(item.name) { pick(item.id, item.name) }.buttonStyle(.link)
+                        }
+                        Button(internalLabel) { pick(nil, internalLabel) }
+                            .buttonStyle(.link)
+                            .foregroundStyle(.secondary)
                     }
-                    Button(internalLabel) { pick(nil, internalLabel) }
-                        .buttonStyle(.link)
-                        .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxHeight: 130)
                 .padding(.leading, compact ? 0 : 44)
             }
             if let searchError {

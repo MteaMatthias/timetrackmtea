@@ -392,9 +392,13 @@ final class CallPrompt {
     static let shared = CallPrompt()
     private var panel: KeyPanel?
 
+    /// Vaste grootte: een venster dat zich aan zijn inhoud aanpast, kan bij het wisselen van inhoud (zoekresultaten)
+    /// in een eindeloze layout-lus raken en de app laten crashen.
+    static let size = NSSize(width: 460, height: 300)
+
     func show() {
         if panel == nil {
-            let p = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 160),
+            let p = KeyPanel(contentRect: NSRect(origin: .zero, size: Self.size),
                              styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView],
                              backing: .buffered, defer: false)
             p.titleVisibility = .hidden
@@ -407,23 +411,29 @@ final class CallPrompt {
             for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
                 p.standardWindowButton(button)?.isHidden = true
             }
-            let controller = NSHostingController(rootView: CallPromptView()
+            let hosting = NSHostingView(rootView: CallPromptView()
                 .environmentObject(CallWatcher.shared)
                 .environmentObject(Teamleader.shared))
-            controller.sizingOptions = [.preferredContentSize]
-            p.contentViewController = controller
+            hosting.frame = NSRect(origin: .zero, size: Self.size)
+            hosting.autoresizingMask = [.width, .height]
+            p.contentView = hosting
+            p.setContentSize(Self.size)
+            p.contentMinSize = Self.size
+            p.contentMaxSize = Self.size
             panel = p
         }
         guard let panel else { return }
+        // Centraal, iets boven het midden van het scherm waar je werkt.
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
-            panel.setFrameTopLeftPoint(NSPoint(x: frame.maxX - panel.frame.width - 16, y: frame.maxY - 12))
+            panel.setFrameOrigin(NSPoint(x: frame.midX - Self.size.width / 2, y: frame.midY))
         }
         panel.orderFrontRegardless()
     }
 
     func hide() {
-        panel?.orderOut(nil)
+        // Pas na de huidige layout-ronde verbergen, nooit middenin.
+        DispatchQueue.main.async { self.panel?.orderOut(nil) }
     }
 }
 
@@ -489,8 +499,8 @@ struct CallPromptView: View {
                 }
             }
         }
-        .padding(16)
-        .frame(width: 380, alignment: .leading)
+        .padding(18)
+        .frame(width: CallPrompt.size.width, height: CallPrompt.size.height, alignment: .topLeading)
         .onChange(of: watcher.current?.memoryKey) { _ in
             choosing = false
             companyId = nil
