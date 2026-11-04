@@ -245,6 +245,6 @@ struct BlockAssignView: View {
             }
         }
         .padding(16)
-        .frame(width: 320)
+        .frame(width: 340, height: 280, alignment: .topLeading)
     }
 }
