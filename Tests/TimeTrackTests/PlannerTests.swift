@@ -355,7 +355,7 @@ final class PlannerTests: XCTestCase {
     }
 
     func testCallCountsAsWorkForTheChosenClient() {
-        activity(t(10), t(10, 30), app: "Flow", title: "Flow")
+        activity(t(10), t(10, 25), app: "Flow", title: "Flow")
         let call = CallRecord(start: t(10), end: t(10, 25), kind: .phone, label: "0493 29 50 63", detail: "Matthias · M&M",
                               companyId: "c-peeters", companyName: "Bakkerij Peeters BV", confirmed: true)
         let p = plan(calls: [call])
