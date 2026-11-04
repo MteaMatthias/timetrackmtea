@@ -163,7 +163,7 @@ final class UISmokeTests: XCTestCase {
         CallWatcher.shared.dismissPrompt()
         XCTAssertTrue(pump(until: { !panel.isVisible }, timeout: 1), "paneel verdwijnt na 'later beslissen'")
         XCTAssertNil(CallWatcher.shared.current)
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        assertFast(since: started, budget: 2)
     }
 
     /// De crash van de eigenaar: bij het kiezen van een klant wisselde de inhoud van grootte en raakte AppKit in een
@@ -218,9 +218,7 @@ final class UISmokeTests: XCTestCase {
             state.hasCall = round % 4 != 3
             step(panel, size)
         }
-        // 72 stappen met elk minstens 10 ms wachten. Een layout-lus valt op door een andere venstergrootte (zie step)
-        // of door seconden per stap; de marge vangt een drukke CI-Mac op (na de end-to-end-tests).
-        XCTAssertLessThan(Date().timeIntervalSince(started), 4, "inhoud wisselen in het paneel is traag (layout-lus?)")
+        assertFast(since: started, budget: 2, "inhoud wisselen in het paneel is traag (layout-lus?)")
     }
 
     @MainActor private func step(_ panel: NSPanel, _ size: NSSize, file: StaticString = #filePath, line: UInt = #line) {
@@ -261,7 +259,7 @@ final class UISmokeTests: XCTestCase {
             window.setContentSize(NSSize(width: width, height: 320))
             settle(window)
         }
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        assertFast(since: started, budget: 2)
     }
 
     @MainActor func testBlockAssignPopoverHasAStableSizeWithAndWithoutPieces() throws {
@@ -306,7 +304,7 @@ final class UISmokeTests: XCTestCase {
                 settle(window)
             }
         }
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2.5)
+        assertFast(since: started, budget: 2.5)
     }
 
     // MARK: - Hele schermen
@@ -371,6 +369,16 @@ final class UISmokeTests: XCTestCase {
         hosting.rootView = environment(RulesView())
         settle(window)
         assertSane(hosting, "Correcties")
+    }
+    /// Tijdsgrens voor de UI. Op de gedeelde CI-Mac (en na de end-to-end-tests) is alles merkbaar trager:
+    /// daar geldt het dubbele. Een echte layout-lus kost seconden per stap of crasht, en valt dus nog altijd op;
+    /// de venstergrootte wordt daarnaast apart streng gecontroleerd.
+    private func assertFast(since started: Date, budget: Double, _ message: String = "",
+                            file: StaticString = #filePath, line: UInt = #line) {
+        let factor = ProcessInfo.processInfo.environment["CI"] == "true" ? 2.0 : 1.0
+        let elapsed = Date().timeIntervalSince(started)
+        print("UI-TIMING: \(String(format: "%.2f", elapsed)) s (grens \(budget * factor) s) \(message)")
+        XCTAssertLessThan(elapsed, budget * factor, message, file: file, line: line)
     }
 }
 
@@ -439,4 +447,5 @@ private struct PromptHarness: View {
             }
         }
     }
+
 }
