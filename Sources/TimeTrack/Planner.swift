@@ -262,9 +262,14 @@ enum Planner {
 
         // 2b. Oproepen (Flow) en meetings: werk voor de klant die je koos of die herkend werd. Ze gaan voor de
         //     agenda; een gesprek zonder klant overschrijft geen herkend werk; "geen klant" telt niet.
-        for call in calls ?? Store.calls(from: lo, to: hi) where !call.skip {
+        // Elk gesprek krijgt een eigen sleutel ("call:…"): het wordt een eigen registratie met zijn echte
+        // begintijd en duur, en wordt nooit bij ander werk voor die klant opgeteld.
+        var callTimes: [String: (start: Double, end: Double)] = [:]
+        for (number, call) in (calls ?? Store.calls(from: lo, to: hi)).enumerated() where !call.skip {
             let m = call.match
-            matches[m.key] = m
+            let callKey = "call:\(call.id == 0 ? Int64(number) : call.id):" + m.key
+            matches[callKey] = m
+            callTimes[callKey] = (max(call.start, lo), min(call.end, hi))
             let reason = call.kind == .phone
                 ? "telefoon met \(call.detail.isEmpty ? call.label : call.detail)"
                 : "meeting: \(call.label)"
@@ -276,15 +281,16 @@ enum Planner {
                     let assignedActivity = minutes[i].filter { !$0.key.isEmpty }.values.reduce(0) { $0 + $1.seconds }
                     if assignedActivity >= 30 { continue }
                 }
-                forced[i] = m.key
-                var info = minutes[i][m.key] ?? Info()
-                info.seconds = max(info.seconds, 60)
-                info.reasons[reason, default: 0] += 60
-                info.activities[call.kind == .phone ? "Telefoon: \(call.label)" : "Meeting: \(call.label)", default: 0] += 60
+                forced[i] = callKey
+                var info = Info()
+                info.seconds = 60
+                info.reasons[reason] = 60
+                info.activities[call.kind == .phone ? "Telefoon: \(call.label)" : "Meeting: \(call.label)"] = 60
+                if call.kind == .meeting { info.descriptions[call.label] = 60 }
+                // Wat er tijdens het gesprek op het scherm stond, hoort bij het gesprek.
+                minutes[i] = [callKey: info]
                 isCall[i] = true
-                if m.isAssigned { pinned[i] = true }
-                if call.kind == .meeting { info.descriptions[call.label, default: 0] += 60 }
-                minutes[i][m.key] = info
+                pinned[i] = true
             }
         }
 
@@ -483,7 +489,7 @@ enum Planner {
         var groupIndex: [String: Int] = [:]
         for run in runs() where run.key != "skip" {
             for r in run.key.isEmpty ? splitUnassigned(run) : [run] {
-            if bundle && !r.key.isEmpty {
+            if bundle && !r.key.isEmpty && !r.key.hasPrefix("call:") {
                 if let g = groupIndex[r.key] { groups[g].append(r) } else {
                     groupIndex[r.key] = groups.count
                     groups.append([r])
@@ -508,12 +514,22 @@ enum Planner {
                 }
             }
             let match = matches[key] ?? .unassigned
-            let parts = group.map { Proposal.Part(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60) }
-            let worked = parts.reduce(0) { $0 + $1.end - $1.start }
+            var parts = group.map { Proposal.Part(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60) }
+            var worked = parts.reduce(0) { $0 + $1.end - $1.start }
             let hasCall = group.contains { r in (r.from..<r.to).contains { isCall[$0] } }
             guard worked >= Double(minProposalMinutes * 60) || hasCall else { continue }
+            let isCallGroup = key.hasPrefix("call:")
+            if isCallGroup, let times = callTimes[key], group.count == 1,
+               index(times.start) == group[0].from, Int(((times.end - lo) / 60).rounded(.up)) == group[0].to {
+                // Het volledige gesprek: de echte begin- en eindtijd, niet de minuutgrenzen.
+                parts = [Proposal.Part(start: times.start, end: times.end)]
+                worked = times.end - times.start
+            }
             var seconds = worked
-            if roundTo > 1 {
+            if isCallGroup {
+                // Een gesprek: de echte duur, op de minuut naar boven (niet op 5 of 15 min).
+                seconds = max(60, (worked / 60).rounded(.up) * 60)
+            } else if roundTo > 1 {
                 // Enkel de duur afronden. De blokken blijven de echte minuten: wat geregistreerd wordt, dekt
                 // nooit tijd die nog moet komen (anders valt bv. een volgend gesprek weg).
                 seconds = max(step, (worked / step).rounded() * step)
@@ -526,7 +542,8 @@ enum Planner {
                 activities: top(info.activities.filter { $0.value >= 30 }, 4).map { "\($0.0) · \(formatDuration($0.1))" },
                 description: match.description.isEmpty ? (top(info.descriptions, 1).first?.0 ?? "") : match.description,
                 learnPattern: top(info.learn, 1).first?.0 ?? "",
-                parts: parts, seconds: seconds, bundled: group.count > 1 || (bundle && !key.isEmpty),
+                parts: parts, seconds: seconds,
+                bundled: !isCallGroup && (group.count > 1 || (bundle && !key.isEmpty)),
                 pieces: group.flatMap { r in
                     pieces(of: r).map {
                         Proposal.Piece(start: lo + Double($0.from) * 60, end: lo + Double($0.to) * 60, label: $0.label)

@@ -516,7 +516,7 @@ final class PlannerTests: XCTestCase {
         let call = CallRecord(start: t(10), end: t(10, 4), kind: .phone, label: "0493 29 50 63",
                               companyId: "c-janssen", companyName: "Janssen NV", confirmed: true)
         let p = plan(roundTo: 5, calls: [call])
-        XCTAssertEqual(p.proposals.first?.seconds ?? 0, 5 * 60, accuracy: 1)
+        XCTAssertEqual(p.proposals.first?.seconds ?? 0, 4 * 60, accuracy: 1, "een gesprek: de echte duur")
         XCTAssertEqual(p.proposals.first?.parts.last?.end, t(10, 4), "het blok zelf blijft 10:00–10:04")
     }
 
@@ -533,12 +533,25 @@ final class PlannerTests: XCTestCase {
         let p = plan(registered: [registered], roundTo: 5, calls: [first, second])
         XCTAssertEqual(p.proposals.count, 1)
         XCTAssertEqual(p.proposals.first?.start, t(10, 5))
-        XCTAssertEqual(p.proposals.first?.seconds ?? 0, 5 * 60, accuracy: 1)
+        XCTAssertEqual(p.proposals.first?.seconds ?? 0, 6 * 60, accuracy: 1)
     }
 
     func testTimeInThePhoneAppOutsideACallIsNotWork() {
         activity(t(10), t(10, 20), app: "Flow", title: "Flow")
         XCTAssertTrue(plan().proposals.isEmpty)
         XCTAssertEqual(plan().worked, 0, accuracy: 1)
+    }
+
+    func testEachCallIsItsOwnRegistrationWithItsRealTime() {
+        activity(t(9), t(10), host: "janssen.be")
+        let call = CallRecord(start: t(10, 0) + 20, end: t(10, 3) + 40, kind: .phone, label: "0493 29 50 63",
+                              companyId: "c-janssen", companyName: "Janssen NV", confirmed: true)
+        activity(t(10, 4), t(11), host: "janssen.be")
+        let p = plan(roundTo: 15, bundle: true, calls: [call])
+        let janssen = p.proposals.filter { $0.match.companyId == "c-janssen" }
+        XCTAssertEqual(janssen.count, 2, "gesprek apart van het andere werk voor Janssen")
+        let phone = janssen.first { $0.reasons.first?.contains("telefoon") ?? false }
+        XCTAssertEqual(phone?.start, t(10, 0) + 20)
+        XCTAssertEqual(phone?.seconds ?? 0, 4 * 60, accuracy: 1, "3 min 20 s → 4 min, niet 15")
     }
 }
