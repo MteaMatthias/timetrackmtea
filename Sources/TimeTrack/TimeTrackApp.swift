@@ -5,6 +5,8 @@ import SwiftUI
 final class AppModel: ObservableObject {
     static let shared = AppModel()
     @Published var revision = 0
+    /// Actief tabblad van het hoofdvenster (0 Vandaag, 1 Week, 2 Correcties, 3 Instellingen).
+    @Published var tab = 0
     func changed() { revision += 1 }
 }
 
@@ -95,15 +97,24 @@ struct MenuContent: View {
     var body: some View {
         Text(tracker.statusText.count > 60 ? String(tracker.statusText.prefix(60)) + "…" : tracker.statusText)
         if !tracker.hasAccessibility {
-            Text("⚠︎ Geen toegang tot venstertitels")
+            Button("⚠︎ Geen toegang tot venstertitels – toestemming geven…") {
+                tracker.requestAccessibility()
+                SystemSettings.open("Privacy_Accessibility")
+            }
         }
         Divider()
         Button("Voorstel van vandaag…") {
             Task { @MainActor in DayModel.shared.day = Date() }
+            AppModel.shared.tab = 0
             open()
         }
         .keyboardShortcut("t")
         Button(tracker.paused ? "Hervat registratie" : "Pauzeer registratie") { tracker.paused.toggle() }
+        Button("Instellingen…") {
+            AppModel.shared.tab = 3
+            open()
+        }
+        .keyboardShortcut(",")
         Divider()
         Button("Stop TimeTrack") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
@@ -115,7 +126,7 @@ struct MainView: View {
     @EnvironmentObject var teamleader: Teamleader
     @StateObject private var updater = Updater.shared
     @AppStorage("onboarded") private var onboarded = false
-    @State private var tab = 0
+    @ObservedObject private var appModel = AppModel.shared
     @State private var showOnboarding = false
 
     var body: some View {
@@ -131,9 +142,9 @@ struct MainView: View {
                 .padding(.horizontal, 16).padding(.vertical, 8)
                 .background(Color.accentColor.opacity(0.15))
             }
-            TabView(selection: $tab) {
+            TabView(selection: $appModel.tab) {
                 TodayView().tabItem { Label("Vandaag", systemImage: "calendar.day.timeline.left") }.tag(0)
-                WeekView(tab: $tab).tabItem { Label("Week", systemImage: "chart.bar") }.tag(1)
+                WeekView(tab: $appModel.tab).tabItem { Label("Week", systemImage: "chart.bar") }.tag(1)
                 RulesView().tabItem { Label("Correcties", systemImage: "wand.and.stars") }.tag(2)
                 SettingsView().tabItem { Label("Instellingen", systemImage: "gearshape") }.tag(3)
             }
