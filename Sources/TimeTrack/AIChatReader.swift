@@ -144,7 +144,7 @@ enum AIChatReader {
             texts = web.map { collect($0.element) } ?? []
             if !texts.isEmpty { break }
         }
-        lock.lock(); cache.removeAll(); lock.unlock()
+        clearCache()
         let found = web.flatMap { title(app: name, web: $0) } ?? "–"
         let top = texts.prefix(25).map { "• \($0.role.replacingOccurrences(of: "AX", with: "")): \($0.text.prefix(60))" }
         let layers = areas.map { "• \($0.url?.absoluteString.prefix(70) ?? "–") · \($0.title ?? "–")" }
@@ -156,6 +156,10 @@ enum AIChatReader {
             Teksten bovenaan (\(texts.count) gelezen):
             \(top.joined(separator: "\n"))
             """
+    }
+
+    private static func clearCache() {
+        lock.lock(); cache.removeAll(); lock.unlock()
     }
 
     private static func mainWindow(_ app: AXUIElement) -> AXUIElement? {
