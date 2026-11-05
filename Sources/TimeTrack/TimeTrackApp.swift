@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import ServiceManagement
 
 /// Laat schermen weten dat regels of registraties gewijzigd zijn.
 final class AppModel: ObservableObject {
@@ -36,9 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
         // Automatisch starten staat standaard aan (eenmalig bij de eerste start).
-        if !UserDefaults.standard.bool(forKey: "launchAtLoginAsked") {
-            UserDefaults.standard.set(true, forKey: "launchAtLoginAsked")
-            try? LaunchAtLogin.set(true)
+        // Automatisch mee opstarten met de Mac: standaard aan, en bij elke start opnieuw vastgezet (ook na een
+        // update of als het eerder niet lukte), tenzij je het zelf uitzette in Instellingen.
+        if !UserDefaults.standard.bool(forKey: "launchAtLoginDisabled"), !LaunchAtLogin.isEnabled {
+            // Stil registreren (zonder Systeeminstellingen te openen bij elke start).
+            try? SMAppService.mainApp.register()
         }
         Store.pruneOldActivity()
         Tracker.shared.start()

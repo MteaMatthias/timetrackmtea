@@ -94,6 +94,7 @@ struct SetupChecklist: View {
                      detail: "TimeTrack start mee op wanneer je je Mac opent, zodat er niets verloren gaat.") {
                 Toggle("", isOn: $launchAtLogin).labelsHidden()
                     .onChange(of: launchAtLogin) { on in
+                        UserDefaults.standard.set(!on, forKey: "launchAtLoginDisabled")
                         do { try LaunchAtLogin.set(on) } catch { self.error = "Automatisch starten: \(error.localizedDescription)" }
                     }
             }
