@@ -478,6 +478,9 @@ final class Teamleader: ObservableObject {
         ])
         let (data, response) = try await URLSession.shared.data(for: req)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 404 {
+            throw TLError.auth("het portaal (tools.mtea.be) kan nog geen feedback ontvangen; stuur ze via mail")
+        }
         guard status == 200 else { throw TLError.api(status, Self.errorMessage(data)) }
     }
 
