@@ -601,6 +601,16 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(p.proposals.first?.match.companyId, "c-janssen", "\(p.proposals.map(\.match.companyName))")
     }
 
+    func testClaudeChatProjectAndCodeGetTheirOwnStableName() {
+        XCTAssertEqual(Tracker.chatName(URL(string: "https://claude.ai/chat/4f2a91c3-1234-5678")!), "Claude-chat 4f2a91c3")
+        XCTAssertEqual(Tracker.chatName(URL(string: "https://claude.ai/project/0198aa11-2233")!), "Claude-project 0198aa11")
+        XCTAssertEqual(Tracker.chatName(URL(string: "https://claude.ai/code/session_01PHQa8y")!), "Claude Code-sessie session_")
+        XCTAssertNil(Tracker.chatName(URL(string: "file:///Applications/Claude.app/Contents/Resources/app.asar/")!))
+        XCTAssertEqual(Planner.chatTitle("Nieuwsbrief november - Claude", app: "Claude"), "Nieuwsbrief november")
+        XCTAssertEqual(Planner.chatTitle("Refactor planner - Claude Code", app: "Claude"), "Refactor planner")
+        XCTAssertEqual(Planner.chatTitle("Claude Code", app: "Claude"), "")
+    }
+
     func testPiecesShowWhatHappenedInsideABlock() {
         activity(t(9), t(9, 20), host: "janssen.be")
         activity(t(9, 20), t(9, 40), app: "Microsoft Word", title: "Offerte Janssen.docx")

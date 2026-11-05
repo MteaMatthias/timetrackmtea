@@ -164,7 +164,7 @@ final class Tracker: ObservableObject {
         if (title.isEmpty || title == name), let window, CFGetTypeID(window) == AXUIElementGetTypeID() {
             // Electron toont zijn webinhoud pas aan de Accessibility-API na deze vraag (één keer per programma).
             AIChatReader.enableWebAccessibility(element, pid: app.processIdentifier)
-            if let web = webArea(window as! AXUIElement) {
+            if let web = webArea(window as! AXUIElement, pid: app.processIdentifier) {
                 if let chat = AIChatReader.title(app: name, web: web) {
                     title = chat
                 } else if let inner = web.title, inner != name, inner != "Claude", inner != "ChatGPT" {
@@ -182,43 +182,97 @@ final class Tracker: ObservableObject {
     static func chatName(_ url: URL) -> String? {
         guard let host = url.host?.lowercased() else { return nil }
         let parts = url.pathComponents.filter { $0 != "/" }
-        guard let index = parts.firstIndex(where: { $0 == "chat" || $0 == "c" }), index + 1 < parts.count else { return nil }
+        guard let index = parts.firstIndex(where: { ["chat", "c", "project", "code"].contains($0) }),
+              index + 1 < parts.count else { return nil }
         let id = String(parts[index + 1].prefix(8))
         let app = host.contains("claude") ? "Claude" : host.contains("openai") || host.contains("chatgpt") ? "ChatGPT" : host
-        return "\(app)-chat \(id)"
+        switch parts[index] {
+        case "project": return "\(app)-project \(id)"
+        case "code": return "Claude Code-sessie \(id)"
+        default: return "\(app)-chat \(id)"
+        }
     }
 
-    /// Zoekt (beperkt in diepte en aantal) het eerste AXWebArea-element: titel en adres van de inhoud.
-    static func webArea(_ root: AXUIElement) -> (title: String?, url: URL?, element: AXUIElement)? {
+    struct WebArea {
+        let title: String?
+        let url: URL?
+        let element: AXUIElement
+    }
+
+    private static let webLock = NSLock()
+    private static var webCache: [pid_t: AXUIElement] = [:]
+    private static var webMiss: [pid_t: Date] = [:]
+
+    /// De webinhoud van een venster. Apps als Claude hebben twee lagen: de app zelf (file://…/app.asar) en
+    /// daarbinnen de echte pagina (https://claude.ai/…). Die echte pagina wordt gekozen en onthouden.
+    static func webArea(_ window: AXUIElement, pid: pid_t = 0) -> WebArea? {
+        webLock.lock()
+        let cached = webCache[pid]
+        webLock.unlock()
+        if pid != 0, let cached, let area = describe(cached), area.url?.isFileURL == false {
+            return area
+        }
+        // Geen echte pagina gevonden: niet elke 5 s opnieuw de hele boom doorzoeken.
+        webLock.lock()
+        let recentMiss = webMiss[pid].map { Date().timeIntervalSince($0) < 20 } ?? false
+        webLock.unlock()
+        if pid != 0, recentMiss { return nil }
+        let areas = webAreas(window)
+        let best = areas.first { ["http", "https"].contains($0.url?.scheme?.lowercased() ?? "") }
+            ?? areas.last { $0.url?.isFileURL == false } ?? areas.last
+        webLock.lock()
+        if pid != 0, let best, best.url?.isFileURL == false {
+            webCache[pid] = best.element
+            webMiss[pid] = nil
+        } else if pid != 0 {
+            webMiss[pid] = Date()
+        }
+        webLock.unlock()
+        return best
+    }
+
+    /// Alle AXWebArea-elementen in een venster (ook geneste), beperkt in aantal en diepte.
+    static func webAreas(_ root: AXUIElement, limit: Int = 1500) -> [WebArea] {
+        var found: [WebArea] = []
         var queue: [(AXUIElement, Int)] = [(root, 0)]
         var visited = 0
-        while !queue.isEmpty, visited < 150 {
+        while !queue.isEmpty, visited < limit, found.count < 6 {
             let (element, depth) = queue.removeFirst()
             visited += 1
             var role: CFTypeRef?
             AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
-            if (role as? String) == "AXWebArea" {
-                var title: String?
-                for attribute in [kAXTitleAttribute, kAXDescriptionAttribute] {
-                    var value: CFTypeRef?
-                    if title == nil, AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
-                       let text = value as? String, !text.trimmingCharacters(in: .whitespaces).isEmpty {
-                        title = text
-                    }
-                }
-                var urlValue: CFTypeRef?
-                AXUIElementCopyAttributeValue(element, "AXURL" as CFString, &urlValue)
-                let url = (urlValue as? URL) ?? (urlValue as? String).flatMap(URL.init(string:))
-                return (title, url, element)
+            let r = role as? String
+            if r == "AXWebArea", let area = describe(element) {
+                found.append(area)
+                // Een pagina met een echt adres: daarbinnen zit geen app-laag meer.
+                if area.url?.isFileURL == false { continue }
             }
-            guard depth < 8 else { continue }
+            // Gewone tekst en knoppen bevatten geen webinhoud: niet verder zoeken.
+            if ["AXStaticText", "AXButton", "AXImage", "AXLink", "AXTextField", "AXTextArea"].contains(r ?? "") { continue }
+            guard depth < 40 else { continue }
             var children: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
                let list = children as? [AXUIElement] {
-                queue.append(contentsOf: list.prefix(30).map { ($0, depth + 1) })
+                queue.append(contentsOf: list.prefix(60).map { ($0, depth + 1) })
             }
         }
-        return nil
+        return found
+    }
+
+    private static func describe(_ element: AXUIElement) -> WebArea? {
+        var urlValue: CFTypeRef?
+        let urlResult = AXUIElementCopyAttributeValue(element, "AXURL" as CFString, &urlValue)
+        var title: String?
+        for attribute in [kAXTitleAttribute, kAXDescriptionAttribute] {
+            var value: CFTypeRef?
+            if title == nil, AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+               let text = value as? String, !text.trimmingCharacters(in: .whitespaces).isEmpty {
+                title = text
+            }
+        }
+        guard urlResult == .success || title != nil else { return nil }
+        let url = (urlValue as? URL) ?? (urlValue as? String).flatMap(URL.init(string:))
+        return WebArea(title: title, url: url, element: element)
     }
 
     static func idleSeconds() -> Double {

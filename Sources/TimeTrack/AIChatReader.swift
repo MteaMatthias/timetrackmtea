@@ -23,7 +23,9 @@ enum AIChatReader {
 
     /// Titel van het gesprek (eventueel met de klant uit de inhoud), of nil als het geen AI-chat is of er niets
     /// bruikbaars te vinden is. Per gesprek hoogstens één keer per 30 s opnieuw gelezen.
-    static func title(app: String, web: (title: String?, url: URL?, element: AXUIElement)) -> String? {
+    static func title(app: String, web: Tracker.WebArea) -> String? {
+        // De app-laag zelf (file://…/app.asar) bevat het gesprek niet.
+        if web.url?.isFileURL == true { return nil }
         let host = web.url?.host?.lowercased() ?? ""
         guard assistantApps.contains(app) || Planner.assistantHosts.contains(host) && !host.contains("youtube") else {
             return nil
@@ -114,33 +116,62 @@ enum AIChatReader {
             .first?.text
     }
 
-    /// Voor de diagnose in Instellingen: wat TimeTrack in het voorste venster leest.
-    static func diagnose() -> String {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return "Geen programma vooraan." }
+    /// Voor de diagnose in Instellingen: wat TimeTrack leest in de Claude-app (of ChatGPT), ook als die niet
+    /// vooraan staat; anders in het voorste programma.
+    static func diagnose() async -> String {
+        let running = NSWorkspace.shared.runningApplications
+        let own = Bundle.main.bundleIdentifier
+        let app = running.first { $0.bundleIdentifier == "com.anthropic.claudefordesktop" }
+            ?? running.first { $0.bundleIdentifier == "com.openai.chat" }
+            ?? NSWorkspace.shared.frontmostApplication.flatMap { $0.bundleIdentifier == own ? nil : $0 }
+        guard let app else { return "Claude is niet geopend." }
         let name = app.localizedName ?? "?"
         let element = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(element, 1)
         enableWebAccessibility(element, pid: app.processIdentifier)
-        var window: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXFocusedWindowAttribute as CFString, &window) == .success,
-              let window, CFGetTypeID(window) == AXUIElementGetTypeID() else {
-            return "\(name): geen venster leesbaar (toegang voor TimeTrack in Privacy → Toegankelijkheid?)"
+        AXUIElementSetAttributeValue(element, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        guard let window = mainWindow(element) else {
+            return "\(name): geen venster leesbaar. Staat TimeTrack aan in Privacy en beveiliging → Toegankelijkheid?"
         }
-        guard let web = Tracker.webArea(window as! AXUIElement) else {
-            return "\(name): geen webinhoud gevonden. Probeer opnieuw (de app heeft soms een paar seconden nodig)."
+        var areas: [Tracker.WebArea] = []
+        var texts: [Text] = []
+        var web: Tracker.WebArea?
+        // Chromium bouwt de toegankelijkheidsboom pas op na de eerste vraag: tot 3 keer proberen.
+        for attempt in 0..<3 {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: 1_500_000_000) }
+            areas = Tracker.webAreas(window)
+            web = areas.first { ["http", "https"].contains($0.url?.scheme?.lowercased() ?? "") } ?? areas.last
+            texts = web.map { collect($0.element) } ?? []
+            if !texts.isEmpty { break }
         }
-        let texts = collect(web.element)
         lock.lock(); cache.removeAll(); lock.unlock()
-        let title = self.title(app: name, web: web) ?? "–"
+        let found = web.flatMap { title(app: name, web: $0) } ?? "–"
         let top = texts.prefix(25).map { "• \($0.role.replacingOccurrences(of: "AX", with: "")): \($0.text.prefix(60))" }
+        let layers = areas.map { "• \($0.url?.absoluteString.prefix(70) ?? "–") · \($0.title ?? "–")" }
         return """
             Programma: \(name)
-            Gevonden gesprek: \(title)
-            Titel webinhoud: \(web.title ?? "–")
-            Adres: \(web.url?.absoluteString.prefix(60) ?? "–")
+            Gevonden gesprek: \(found)
+            Webinhoud (\(areas.count) lagen):
+            \(layers.isEmpty ? "• geen" : layers.joined(separator: "\n"))
             Teksten bovenaan (\(texts.count) gelezen):
             \(top.joined(separator: "\n"))
             """
+    }
+
+    private static func mainWindow(_ app: AXUIElement) -> AXUIElement? {
+        for attribute in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
+            var value: CFTypeRef?
+            if AXUIElementCopyAttributeValue(app, attribute as CFString, &value) == .success, let value,
+               CFGetTypeID(value) == AXUIElementGetTypeID() {
+                return (value as! AXUIElement)
+            }
+        }
+        var windows: CFTypeRef?
+        if AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windows) == .success,
+           let list = windows as? [AXUIElement] {
+            return list.first
+        }
+        return nil
     }
 
     private static func string(_ element: AXUIElement, _ attribute: String) -> String? {

@@ -184,12 +184,12 @@ struct SettingsView: View {
     /// 5 seconden om Claude (of ChatGPT) vooraan te zetten; dan lezen wat TimeTrack daar ziet.
     private func testChat() async {
         chatTest = nil
-        for second in stride(from: 5, to: 0, by: -1) {
+        for second in stride(from: 2, to: 0, by: -1) {
             chatCountdown = second
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
         chatCountdown = 0
-        chatTest = AIChatReader.diagnose()
+        chatTest = await AIChatReader.diagnose()
         NSApp.activate(ignoringOtherApps: true)
     }
     @State private var confirmWipe = false
@@ -261,7 +261,7 @@ struct SettingsView: View {
             Section("AI-chats (Claude, ChatGPT)") {
                 Text("TimeTrack leest de titel van het gesprek en zoekt er een klantnaam in, zodat je chat bij de juiste klant komt. Er wordt niets van het gesprek bewaard behalve die titel.")
                     .font(.caption).foregroundStyle(.secondary)
-                Button(chatCountdown > 0 ? "Open nu je chat… \(chatCountdown)" : "Test: wat leest TimeTrack in Claude?") {
+                Button(chatCountdown > 0 ? "Even geduld… \(chatCountdown)" : "Test: wat leest TimeTrack in Claude?") {
                     Task { await testChat() }
                 }
                 .disabled(chatCountdown > 0)

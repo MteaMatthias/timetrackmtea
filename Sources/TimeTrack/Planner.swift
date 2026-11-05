@@ -132,12 +132,12 @@ enum Planner {
     /// "Offerte Janssen - Claude" → "Offerte Janssen"; een titel die enkel de naam van de assistent is, telt niet.
     static func chatTitle(_ title: String, app: String) -> String {
         var t = Matcher.cleanTitle(title)
-        for suffix in [" - Claude", " – Claude", " | Claude", " - ChatGPT", " | ChatGPT", " - Gemini", " - Perplexity",
+        for suffix in [" - Claude Code", " – Claude Code", " - Claude", " – Claude", " | Claude", " - ChatGPT", " | ChatGPT", " - Gemini", " - Perplexity",
                        " - Google Chrome", " — Google Chrome", " - Safari", " - Microsoft Edge"] where t.hasSuffix(suffix) {
             t = String(t.dropLast(suffix.count))
         }
         t = t.trimmingCharacters(in: .whitespaces)
-        let generic: Set<String> = ["", app, "Claude", "ChatGPT", "Gemini", "Copilot", "Perplexity", "New chat",
+        let generic: Set<String> = ["", app, "Claude", "Claude Code", "ChatGPT", "Gemini", "Copilot", "Perplexity", "New chat",
                                     "Nieuwe chat", "New Chat"]
         return generic.contains(t) ? "" : t
     }
