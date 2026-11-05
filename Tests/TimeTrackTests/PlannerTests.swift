@@ -581,6 +581,26 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(rows.first?.double("end") ?? 0, lo, accuracy: 0.5, "het deel vóór middernacht blijft")
     }
 
+    func testClaudeConversationTitleIsTakenFromTheHeaderNotTheSidebar() {
+        typealias T = AIChatReader.Text
+        let texts = [
+            T(text: "Claude", role: "AXStaticText", frame: CGRect(x: 0, y: 30, width: 80, height: 20)),
+            T(text: "New chat", role: "AXButton", frame: CGRect(x: 10, y: 60, width: 120, height: 24)),
+            T(text: "Offerte dakwerken Peeters", role: "AXLink", frame: CGRect(x: 10, y: 120, width: 200, height: 20)),
+            T(text: "Nieuwsbrief november Janssen", role: "AXButton", frame: CGRect(x: 420, y: 34, width: 260, height: 24)),
+            T(text: "Share", role: "AXButton", frame: CGRect(x: 1200, y: 34, width: 60, height: 24)),
+            T(text: "Schrijf een nieuwsbrief over…", role: "AXStaticText", frame: CGRect(x: 420, y: 200, width: 600, height: 40)),
+        ]
+        XCTAssertEqual(AIChatReader.headerTitle(texts), "Nieuwsbrief november Janssen")
+        XCTAssertNil(AIChatReader.headerTitle(Array(texts.prefix(3)) + [texts[4]]), "enkel vaste knoppen: geen titel")
+    }
+
+    func testAChatTitleWithTheClientNameGoesToThatClient() {
+        activity(t(9), t(9, 30), app: "Claude", title: "Nieuwsbrief november — Janssen NV")
+        let p = plan()
+        XCTAssertEqual(p.proposals.first?.match.companyId, "c-janssen", "\(p.proposals.map(\.match.companyName))")
+    }
+
     func testPiecesShowWhatHappenedInsideABlock() {
         activity(t(9), t(9, 20), host: "janssen.be")
         activity(t(9, 20), t(9, 40), app: "Microsoft Word", title: "Offerte Janssen.docx")

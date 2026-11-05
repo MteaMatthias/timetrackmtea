@@ -263,6 +263,7 @@ struct MainView: View {
     private let sections: [(tag: Int, title: String, icon: String)] = [
         (0, "Vandaag", "sun.max.fill"), (1, "Week", "chart.bar.fill"),
         (2, "Correcties", "wand.and.stars"), (3, "Instellingen", "gearshape.fill"),
+        (4, "Feedback", "bubble.left.and.text.bubble.right.fill"),
     ]
 
     var body: some View {
@@ -289,6 +290,7 @@ struct MainView: View {
                 case 1: WeekView(tab: $appModel.tab)
                 case 2: RulesView()
                 case 3: SettingsView()
+                case 4: FeedbackView()
                 default: TodayView()
                 }
             }

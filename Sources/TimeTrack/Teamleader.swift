@@ -460,6 +460,27 @@ final class Teamleader: ObservableObject {
         return (data, response as? HTTPURLResponse ?? HTTPURLResponse())
     }
 
+    /// Feedback naar MTEA via het portaal (mail met jouw naam als afzender). Enkel de tekst en de versie gaan mee,
+    /// nooit je activiteit.
+    func sendFeedback(_ message: String, category: String) async throws {
+        guard tokens != nil else { throw TLError.notConnected }
+        if let current = tokens, current.expires < Date() { try await refreshTokens() }
+        guard let url = URL(string: portalURL + "/api/timetrack/feedback") else { throw TLError.auth("ongeldig portaaladres") }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 30
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("Bearer \(tokens?.access ?? "")", forHTTPHeaderField: "Authorization")
+        let system = ProcessInfo.processInfo.operatingSystemVersionString
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "message": message, "category": category, "version": Updater.shared.current, "system": "macOS \(system)",
+        ])
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else { throw TLError.api(status, Self.errorMessage(data)) }
+    }
+
     /// Refresh tokens zijn maar één keer bruikbaar: gelijktijdige vernieuwingen worden samengevoegd.
     private func refreshTokens() async throws {
         if let running = refreshTask { return try await running.value }

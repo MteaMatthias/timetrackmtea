@@ -178,6 +178,20 @@ struct SettingsView: View {
     @AppStorage("bundlePerClient") private var bundlePerClient = true
     @AppStorage("callPromptsDisabled") private var callPromptsDisabled = false
     @State private var flowTest: String?
+    @State private var chatTest: String?
+    @State private var chatCountdown = 0
+
+    /// 5 seconden om Claude (of ChatGPT) vooraan te zetten; dan lezen wat TimeTrack daar ziet.
+    private func testChat() async {
+        chatTest = nil
+        for second in stride(from: 5, to: 0, by: -1) {
+            chatCountdown = second
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        chatCountdown = 0
+        chatTest = AIChatReader.diagnose()
+        NSApp.activate(ignoringOtherApps: true)
+    }
     @State private var confirmWipe = false
     @State private var portalURL = ""
     @State private var useCustomClient = false
@@ -241,6 +255,22 @@ struct SettingsView: View {
                 Button("Test de herkenning in Flow") { flowTest = Self.flowDiagnosis() }
                 if let flowTest {
                     Text(flowTest).font(.caption.monospaced()).textSelection(.enabled)
+                }
+            }
+
+            Section("AI-chats (Claude, ChatGPT)") {
+                Text("TimeTrack leest de titel van het gesprek en zoekt er een klantnaam in, zodat je chat bij de juiste klant komt. Er wordt niets van het gesprek bewaard behalve die titel.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button(chatCountdown > 0 ? "Open nu je chat… \(chatCountdown)" : "Test: wat leest TimeTrack in Claude?") {
+                    Task { await testChat() }
+                }
+                .disabled(chatCountdown > 0)
+                if let chatTest {
+                    Text(chatTest).font(.caption.monospaced()).textSelection(.enabled)
+                    Button("Kopieer") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(chatTest, forType: .string)
+                    }
                 }
             }
 

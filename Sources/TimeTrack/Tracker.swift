@@ -161,20 +161,25 @@ final class Tracker: ObservableObject {
         let name = app.localizedName ?? "?"
         // Electron-apps (Claude, ChatGPT, Slack…) tonen vaak enkel hun naam als venstertitel;
         // de titel van het gesprek staat dan in de webinhoud van het venster.
-        if (title.isEmpty || title == name), let window, CFGetTypeID(window) == AXUIElementGetTypeID(),
-           let web = webArea(window as! AXUIElement) {
-            if let inner = web.title, inner != name, inner != "Claude", inner != "ChatGPT" {
-                title = inner
-            } else if let url = web.url, let chat = chatName(url) {
-                // Chat-apps tonen geen gesprekstitel: een vaste naam per gesprek, zodat "Onthoud" werkt.
-                title = chat
+        if (title.isEmpty || title == name), let window, CFGetTypeID(window) == AXUIElementGetTypeID() {
+            // Electron toont zijn webinhoud pas aan de Accessibility-API na deze vraag (één keer per programma).
+            AIChatReader.enableWebAccessibility(element, pid: app.processIdentifier)
+            if let web = webArea(window as! AXUIElement) {
+                if let chat = AIChatReader.title(app: name, web: web) {
+                    title = chat
+                } else if let inner = web.title, inner != name, inner != "Claude", inner != "ChatGPT" {
+                    title = inner
+                } else if let url = web.url, let chat = chatName(url) {
+                    // Geen gesprekstitel te vinden: een vaste naam per gesprek, zodat "Onthoud" werkt.
+                    title = chat
+                }
             }
         }
         return (name, app.bundleIdentifier ?? "", title)
     }
 
     /// "https://claude.ai/chat/4f2a91c3-…" → "Claude-chat 4f2a91c3"
-    private static func chatName(_ url: URL) -> String? {
+    static func chatName(_ url: URL) -> String? {
         guard let host = url.host?.lowercased() else { return nil }
         let parts = url.pathComponents.filter { $0 != "/" }
         guard let index = parts.firstIndex(where: { $0 == "chat" || $0 == "c" }), index + 1 < parts.count else { return nil }
@@ -184,7 +189,7 @@ final class Tracker: ObservableObject {
     }
 
     /// Zoekt (beperkt in diepte en aantal) het eerste AXWebArea-element: titel en adres van de inhoud.
-    private static func webArea(_ root: AXUIElement) -> (title: String?, url: URL?)? {
+    static func webArea(_ root: AXUIElement) -> (title: String?, url: URL?, element: AXUIElement)? {
         var queue: [(AXUIElement, Int)] = [(root, 0)]
         var visited = 0
         while !queue.isEmpty, visited < 150 {
@@ -204,7 +209,7 @@ final class Tracker: ObservableObject {
                 var urlValue: CFTypeRef?
                 AXUIElementCopyAttributeValue(element, "AXURL" as CFString, &urlValue)
                 let url = (urlValue as? URL) ?? (urlValue as? String).flatMap(URL.init(string:))
-                return (title, url)
+                return (title, url, element)
             }
             guard depth < 8 else { continue }
             var children: CFTypeRef?
