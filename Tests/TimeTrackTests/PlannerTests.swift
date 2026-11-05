@@ -562,6 +562,25 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(Prefs.billed(180), 900)
     }
 
+    func testWipingADayRemovesOnlyThatDaysTracking() {
+        activity(t(10), t(12), host: "janssen.be")
+        let nextDay = t(10) + 86400
+        activity(nextDay, nextDay + 3600, host: "janssen.be")
+        // Loopt over middernacht de dag in: enkel het deel van die dag verdwijnt.
+        activity(t(0) - 600, t(0) + 600, host: "janssen.be")
+        Store.assign(start: t(10), end: t(11), to: Match(companyId: "c-peeters", companyName: "Bakkerij Peeters BV"))
+        Store.dismiss(start: t(11), end: t(11, 30))
+        let (lo, hi) = Store.dayBounds(day)
+        Store.wipeDay(from: lo, to: hi)
+        XCTAssertEqual(plan().worked, 0, "na wissen nog activiteit op deze dag")
+        XCTAssertTrue(plan().proposals.isEmpty)
+        XCTAssertTrue(Store.assignments(from: lo, to: hi).isEmpty)
+        XCTAssertTrue(Store.dismissed(from: lo, to: hi).isEmpty)
+        let rows = Database.shared.query("SELECT start, end FROM activity ORDER BY start")
+        XCTAssertEqual(rows.count, 2, "de andere dagen blijven staan")
+        XCTAssertEqual(rows.first?.double("end") ?? 0, lo, accuracy: 0.5, "het deel vóór middernacht blijft")
+    }
+
     func testPiecesShowWhatHappenedInsideABlock() {
         activity(t(9), t(9, 20), host: "janssen.be")
         activity(t(9, 20), t(9, 40), app: "Microsoft Word", title: "Offerte Janssen.docx")

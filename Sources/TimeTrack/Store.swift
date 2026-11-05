@@ -262,6 +262,19 @@ enum Store {
     }
 
     /// "Wis mijn activiteit": alles wat bijgehouden werd, niet de regels of instellingen.
+    /// Wist alles wat TimeTrack op één dag bijhield (activiteit, gesprekken, toewijzingen, genegeerde blokken).
+    /// Registraties in Teamleader blijven staan. Iets dat over middernacht loopt, wordt afgeknipt.
+    static func wipeDay(from lo: Double, to hi: Double) {
+        Database.shared.transaction {
+            for table in ["activity", "calls", "dismissed", "assignments"] {
+                Database.shared.run("DELETE FROM \(table) WHERE start >= ? AND start < ?", lo, hi)
+                Database.shared.run("UPDATE \(table) SET end = ? WHERE start < ? AND end > ?", lo, lo, lo)
+                Database.shared.run("UPDATE \(table) SET start = ? WHERE start < ? AND end > ?", hi, hi, hi)
+            }
+        }
+        bumpDataVersion()
+    }
+
     static func wipeActivity() {
         for table in ["activity", "calls", "dismissed", "assignments"] {
             Database.shared.run("DELETE FROM \(table)")

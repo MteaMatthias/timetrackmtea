@@ -248,6 +248,7 @@ struct TodayView: View {
     @EnvironmentObject var appModel: AppModel
     @State private var showRegistered = false
     @State private var confirmAll: [Proposal]?
+    @State private var confirmWipe = false
     @State private var deleting: Registered?
 
     private var plan: DayPlan { model.plan }
@@ -308,8 +309,26 @@ struct TodayView: View {
                     if model.loading { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.clockwise") }
                 }
                 .help("Vernieuwen")
+                Menu {
+                    Button("Wis alle gegevens van deze dag…", role: .destructive) { confirmWipe = true }
+                } label: { Image(systemName: "ellipsis.circle") }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Meer")
             }
             .controlSize(.large)
+            .confirmationDialog("Alle gegevens van \(model.day.formatted(.dateTime.weekday(.wide).day().month(.wide))) wissen?",
+                                isPresented: $confirmWipe, titleVisibility: .visible) {
+                Button("Wis deze dag", role: .destructive) {
+                    let (lo, hi) = Store.dayBounds(model.day)
+                    Store.wipeDay(from: lo, to: hi)
+                    model.edits = [:]
+                    appModel.changed()
+                }
+                Button("Annuleren", role: .cancel) {}
+            } message: {
+                Text("Alles wat TimeTrack op deze dag bijhield, wordt gewist: activiteit, gesprekken, toewijzingen en genegeerde blokken. Registraties die al in Teamleader staan, blijven staan (verwijder die apart). Dit kan niet ongedaan gemaakt worden.")
+            }
         }
     }
 
