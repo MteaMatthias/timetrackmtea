@@ -182,13 +182,15 @@ final class Tracker: ObservableObject {
     static func chatName(_ url: URL) -> String? {
         guard let host = url.host?.lowercased() else { return nil }
         let parts = url.pathComponents.filter { $0 != "/" }
-        guard let index = parts.firstIndex(where: { ["chat", "c", "project", "code"].contains($0) }),
+        guard let index = parts.firstIndex(where: { ["chat", "c", "project", "code", "epitaxy"].contains($0) }),
               index + 1 < parts.count else { return nil }
-        let id = String(parts[index + 1].prefix(8))
+        var raw = parts[index + 1]
+        if raw.hasPrefix("session_") { raw.removeFirst("session_".count) }
+        let id = String(raw.prefix(8))
         let app = host.contains("claude") ? "Claude" : host.contains("openai") || host.contains("chatgpt") ? "ChatGPT" : host
         switch parts[index] {
         case "project": return "\(app)-project \(id)"
-        case "code": return "Claude Code-sessie \(id)"
+        case "code", "epitaxy": return "Claude Code-sessie \(id)"
         default: return "\(app)-chat \(id)"
         }
     }

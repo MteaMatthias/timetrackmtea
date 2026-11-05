@@ -42,9 +42,11 @@ enum AIChatReader {
         if title.isEmpty, let url = web.url, let id = Tracker.chatName(url) { title = id }
         var result: String? = title.isEmpty ? nil : title
         // Een klantnaam in het gesprek (niet in de titel): erbij zetten zodat het voorstel de klant kent.
-        if let base = result {
-            let content = texts.prefix(120).map(\.text).joined(separator: " \u{2022} ")
-            let (match, _) = Matcher.current().match(app: "", title: String(content.prefix(4000)), host: "")
+        // Enkel het gesprek zelf: niet de zijbalk (andere chats en sessies) en niet als de titel al een klant noemt.
+        if let base = result, !Matcher.current().match(app: app, title: base, host: "").0.isAssigned {
+            let content = conversationText(texts)
+            let (match, _) = content.isEmpty
+                ? (Match.unassigned, "") : Matcher.current().match(app: "", title: content, host: "")
             if match.isAssigned, !match.companyName.isEmpty,
                !Matcher.normalize(base).contains(Matcher.normalize(match.companyName, stripLegalForms: true)) {
                 result = "\(base) — \(match.companyName)"
@@ -86,6 +88,20 @@ enum AIChatReader {
             }
         }
         return out
+    }
+
+    /// De tekst van het gesprek zelf: gewone tekst rechts van de zijbalk en onder de kopbalk. Knoppen en links
+    /// (de lijst met andere chats, projecten en sessies) tellen niet mee. Zonder plaatsinfo: niets.
+    static func conversationText(_ texts: [Text]) -> String {
+        let framed = texts.filter { $0.frame.width > 0 && $0.frame.height > 0 }
+        guard let top = framed.map(\.frame.minY).min(),
+              let left = framed.map(\.frame.minX).min(),
+              let right = framed.map(\.frame.maxX).max(), right - left > 300 else { return "" }
+        let start = left + (right - left) * 0.25
+        let body = framed.filter {
+            ["AXStaticText", "AXHeading"].contains($0.role) && $0.frame.minX >= start && $0.frame.minY - top > 50
+        }
+        return String(body.prefix(200).map(\.text).joined(separator: " \u{2022} ").prefix(4000))
     }
 
     private static let ignored: Set<String> = [

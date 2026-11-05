@@ -604,11 +604,27 @@ final class PlannerTests: XCTestCase {
     func testClaudeChatProjectAndCodeGetTheirOwnStableName() {
         XCTAssertEqual(Tracker.chatName(URL(string: "https://claude.ai/chat/4f2a91c3-1234-5678")!), "Claude-chat 4f2a91c3")
         XCTAssertEqual(Tracker.chatName(URL(string: "https://claude.ai/project/0198aa11-2233")!), "Claude-project 0198aa11")
-        XCTAssertEqual(Tracker.chatName(URL(string: "https://claude.ai/code/session_01PHQa8y")!), "Claude Code-sessie session_")
+        XCTAssertEqual(Tracker.chatName(URL(string: "https://claude.ai/code/session_01PHQa8y")!), "Claude Code-sessie 01PHQa8y")
         XCTAssertNil(Tracker.chatName(URL(string: "file:///Applications/Claude.app/Contents/Resources/app.asar/")!))
         XCTAssertEqual(Planner.chatTitle("Nieuwsbrief november - Claude", app: "Claude"), "Nieuwsbrief november")
         XCTAssertEqual(Planner.chatTitle("Refactor planner - Claude Code", app: "Claude"), "Refactor planner")
         XCTAssertEqual(Planner.chatTitle("Claude Code", app: "Claude"), "")
+    }
+
+    func testClientNameInTheSidebarOfClaudeIsIgnored() {
+        typealias T = AIChatReader.Text
+        let texts = [
+            T(text: "Claude Code", role: "AXHeading", frame: CGRect(x: 0, y: 20, width: 120, height: 20)),
+            T(text: "Schilder Kurt Peers", role: "AXButton", frame: CGRect(x: 10, y: 300, width: 220, height: 20)),
+            T(text: "Schilder Kurt Peers offerte", role: "AXStaticText", frame: CGRect(x: 12, y: 330, width: 220, height: 20)),
+            T(text: "Includio website audit", role: "AXButton", frame: CGRect(x: 420, y: 24, width: 260, height: 24)),
+            T(text: "Controleer de website van Includio op toegankelijkheid", role: "AXStaticText",
+              frame: CGRect(x: 420, y: 200, width: 700, height: 40)),
+        ]
+        let content = AIChatReader.conversationText(texts)
+        XCTAssertTrue(content.contains("Includio"), content)
+        XCTAssertFalse(content.contains("Kurt Peers"), "de zijbalk telt niet mee: \(content)")
+        XCTAssertEqual(Tracker.chatName(URL(string: "https://claude.ai/epitaxy/session_018KqUCf2b9V")!), "Claude Code-sessie 018KqUCf")
     }
 
     func testPiecesShowWhatHappenedInsideABlock() {
